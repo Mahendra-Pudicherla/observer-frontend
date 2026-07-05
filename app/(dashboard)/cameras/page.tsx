@@ -12,7 +12,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { BACKEND_API_URL, COLORS, type Camera } from "@/lib/constants";
+import { BACKEND_API_URL, COLORS, getCameraNodeUrl, type Camera } from "@/lib/constants";
 import {
   Plus,
   Camera as CameraIcon,
@@ -35,11 +35,15 @@ export default function CamerasPage() {
   const [copied, setCopied] = useState<string | null>(null);
 
   const loadCameras = async () => {
+    console.log("[Observer] loadCameras — org?.id:", org?.id, "BACKEND_API_URL:", BACKEND_API_URL);
     if (!org?.id) return;
     try {
-      const res = await fetch(`${BACKEND_API_URL}/cameras/${org.id}`);
+      const url = `${BACKEND_API_URL}/cameras/${org.id}`;
+      console.log("[Observer] loadCameras — fetching:", url);
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to load cameras (${res.status})`);
       const data: Camera[] = await res.json();
+      console.log("[Observer] loadCameras — result:", data);
       setCameras(data);
     } catch (e) {
       console.error("Load cameras error:", e);
@@ -90,9 +94,7 @@ export default function CamerasPage() {
   };
 
   const cameraNodeUrl = (cameraId: string) =>
-    typeof window !== "undefined"
-      ? `${window.location.origin}/camera-node/${cameraId}?orgId=${org?.id}`
-      : `/camera-node/${cameraId}?orgId=${org?.id}`;
+    org?.id ? getCameraNodeUrl(cameraId, org.id) : "";
 
   const copyUrl = async (cameraId: string) => {
     await navigator.clipboard.writeText(cameraNodeUrl(cameraId));

@@ -47,29 +47,33 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    console.log("[Observer] refreshOrg — user:", user?.id ?? "null");
     if (!user) {
       setOrg(null);
       return;
     }
 
-    const { data: membership } = await supabase
+    const { data: membership, error: memberErr } = await supabase
       .from("org_members")
       .select("org_id")
       .eq("user_id", user.id)
       .limit(1)
       .maybeSingle();
 
+    console.log("[Observer] refreshOrg — membership:", membership, "error:", memberErr);
+
     if (!membership?.org_id) {
       setOrg(null);
       return;
     }
 
-    const { data: organization } = await supabase
+    const { data: organization, error: orgErr } = await supabase
       .from("organizations")
       .select("*")
       .eq("id", membership.org_id)
       .maybeSingle();
 
+    console.log("[Observer] refreshOrg — org:", organization, "error:", orgErr);
     setOrg(organization as Organization | null);
   };
 

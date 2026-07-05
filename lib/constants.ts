@@ -18,6 +18,17 @@ export const BACKEND_WS_URL =
 export const BACKEND_API_URL =
   process.env.NEXT_PUBLIC_BACKEND_API_URL ?? "http://localhost:8000";
 
+/** LAN URL for phone camera nodes — set to http://YOUR_LAPTOP_IP:3000 */
+export const APP_URL =
+  process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
+
+export function getCameraNodeUrl(cameraId: string, orgId: string): string {
+  const base =
+    APP_URL ||
+    (typeof window !== "undefined" ? window.location.origin : "http://localhost:3000");
+  return `${base}/camera-node/${encodeURIComponent(cameraId)}?orgId=${encodeURIComponent(orgId)}`;
+}
+
 export const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 export const SUPABASE_ANON_KEY =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
