@@ -8,7 +8,7 @@ import { Eye, EyeOff, ArrowRight, Shield, Building2 } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { COLORS } from "@/lib/constants";
+import { BACKEND_API_URL, COLORS } from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
 
 type Stage = "account" | "organisation";
@@ -75,29 +75,27 @@ export default function SignupPage() {
       return;
     }
 
-    // Construct a minimal user-like object for downstream use
-    const user = sessionUser ?? { id: userId };
+    // Route through backend API (service-role key bypasses RLS)
+    try {
+      const res = await fetch(`${BACKEND_API_URL}/onboarding/setup-org`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId,
+          org_name: orgName,
+          org_type: orgType,
+          plan: "starter",
+        }),
+      });
 
-    const { data: org, error: orgError } = await supabase
-      .from("organizations")
-      .insert({ name: orgName, org_type: orgType, plan: "starter" })
-      .select()
-      .single();
-
-    if (orgError) {
-      setError(orgError.message);
-      setLoading(false);
-      return;
-    }
-
-    const { error: memberError } = await supabase.from("org_members").insert({
-      org_id: org.id,
-      user_id: user.id,
-      role: "admin",
-    });
-
-    if (memberError) {
-      setError(memberError.message);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setError(detail?.detail || `Setup failed (${res.status})`);
+        setLoading(false);
+        return;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error");
       setLoading(false);
       return;
     }
