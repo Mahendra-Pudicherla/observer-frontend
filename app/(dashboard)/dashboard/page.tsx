@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence, useInView } from "framer-motion";
 import { useSession } from "@/components/SessionProvider";
 import { useAlertSocket } from "@/hooks/useAlertSocket";
@@ -132,13 +132,20 @@ function CameraFeedCard({
   orgId,
   isAlerting,
   index,
+  onLiveChange,
 }: {
   camera: Camera;
   orgId: string;
   isAlerting: boolean;
   index: number;
+  onLiveChange?: (cameraId: string, isLive: boolean) => void;
 }) {
   const { frame, live } = useCameraFeed(orgId, camera.id);
+
+  // Notify parent when live status changes
+  useEffect(() => {
+    onLiveChange?.(camera.id, live);
+  }, [live, camera.id, onLiveChange]);
 
   return (
     <motion.div
@@ -223,6 +230,16 @@ export default function DashboardPage() {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [alertingCameras, setAlertingCameras] = useState<Set<string>>(new Set());
+  const [liveCameras, setLiveCameras] = useState<Set<string>>(new Set());
+
+  const handleLiveChange = useCallback((cameraId: string, isLive: boolean) => {
+    setLiveCameras((prev) => {
+      const next = new Set(prev);
+      if (isLive) next.add(cameraId);
+      else next.delete(cameraId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     // ── Demo mode: seed with realistic mock data ──────────────
@@ -264,7 +281,7 @@ export default function DashboardPage() {
     }
   }, [activeAlert]);
 
-  const onlineCount = cameras.filter((c) => c.is_active).length;
+  const onlineCount = liveCameras.size;
   const todayCount = incidents.filter((i) => {
     if (!i.created_at) return false;
     return new Date(i.created_at).toDateString() === new Date().toDateString();
@@ -401,6 +418,7 @@ export default function DashboardPage() {
                   orgId={org?.id ?? ""}
                   isAlerting={alertingCameras.has(camera.id)}
                   index={i}
+                  onLiveChange={handleLiveChange}
                 />
               ))
             )}
@@ -455,7 +473,9 @@ export default function DashboardPage() {
             <CameraIcon className="h-4 w-4" style={{ color: COLORS.slate }} />
           </div>
           <div className="divide-y px-4" style={{ borderColor: "rgba(0,0,0,0.04)" }}>
-            {cameras.map((camera) => (
+            {cameras.map((camera) => {
+              const isLive = liveCameras.has(camera.id);
+              return (
               <div key={camera.id} className="flex items-center justify-between py-3">
                 <div>
                   <p className="text-xs font-semibold" style={{ color: COLORS.midnight }}>{camera.id}</p>
@@ -463,16 +483,17 @@ export default function DashboardPage() {
                 </div>
                 <span
                   className="flex items-center gap-1.5 text-xs font-semibold"
-                  style={{ color: camera.is_active ? COLORS.safeGreen : COLORS.slate }}
+                  style={{ color: isLive ? COLORS.safeGreen : COLORS.slate }}
                 >
                   <span
-                    className={`h-2 w-2 rounded-full ${camera.is_active ? "animate-pulse-slow" : ""}`}
-                    style={{ backgroundColor: camera.is_active ? COLORS.safeGreen : "#cbd5e1" }}
+                    className={`h-2 w-2 rounded-full ${isLive ? "animate-pulse-slow" : ""}`}
+                    style={{ backgroundColor: isLive ? COLORS.safeGreen : "#cbd5e1" }}
                   />
-                  {camera.is_active ? "Online" : "Offline"}
+                  {isLive ? "Live" : "Offline"}
                 </span>
               </div>
-            ))}
+              );
+            })}
             {cameras.length === 0 && (
               <div className="py-6 text-center">
                 <p className="text-xs" style={{ color: COLORS.slate }}>No cameras yet</p>
