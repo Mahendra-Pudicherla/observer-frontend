@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useMemo, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "@/components/Logo";
 import { BACKEND_WS_URL, COLORS, type Camera } from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
@@ -19,17 +19,20 @@ export default function CameraNodePage({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const [camera, setCamera] = useState<Camera | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
+  const [frameCount, setFrameCount] = useState(0);
 
+  // Load camera metadata
   useEffect(() => {
     if (!orgId || !cameraId) {
       setError("Missing orgId query parameter.");
       return;
     }
-
     const loadCamera = async () => {
       const { data } = await supabase
         .from("cameras")
@@ -39,67 +42,89 @@ export default function CameraNodePage({
         .maybeSingle();
       setCamera(data as Camera | null);
     };
-
     void loadCamera();
   }, [orgId, cameraId, supabase]);
 
-  useEffect(() => {
+  // Start camera + WebSocket stream
+  const startStream = useCallback(async () => {
     if (!orgId) return;
+    setError(null);
 
-    const startStream = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+    // Stop any existing stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode } },
+        audio: false,
+      });
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      // Keep screen awake
+      if ("wakeLock" in navigator) {
+        try {
+          await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<unknown> } }).wakeLock.request("screen");
+        } catch {
+          // optional
         }
+      }
 
-        if ("wakeLock" in navigator) {
-          try {
-            await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<unknown> } }).wakeLock.request("screen");
-          } catch {
-            // optional
-          }
-        }
-
+      // Connect WebSocket if not already connected
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         const wsUrl = `${BACKEND_WS_URL.replace(/^http/, "ws")}/ws/stream/${orgId}/${cameraId}`;
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
-
         ws.onopen = () => setConnected(true);
         ws.onclose = () => setConnected(false);
         ws.onerror = () => setConnected(false);
-
-        intervalRef.current = setInterval(() => {
-          const video = videoRef.current;
-          const canvas = canvasRef.current;
-          if (!video || !canvas || ws.readyState !== WebSocket.OPEN) return;
-
-          canvas.width = video.videoWidth || 640;
-          canvas.height = video.videoHeight || 480;
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-          ctx.drawImage(video, 0, 0);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-          ws.send(JSON.stringify({ frame: dataUrl }));
-        }, 300);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Camera access denied");
       }
-    };
 
+      // Clear old interval
+      if (intervalRef.current) clearInterval(intervalRef.current);
+
+      // Send frames at ~3 FPS
+      intervalRef.current = setInterval(() => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        const ws = wsRef.current;
+        if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+        ws.send(JSON.stringify({ frame: dataUrl }));
+        setFrameCount((c) => c + 1);
+      }, 300);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Camera access denied");
+    }
+  }, [orgId, cameraId, facingMode]);
+
+  // Start stream on mount and when facingMode changes
+  useEffect(() => {
     void startStream();
-
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
       wsRef.current?.close();
-      const stream = videoRef.current?.srcObject as MediaStream | null;
-      stream?.getTracks().forEach((t) => t.stop());
+      wsRef.current = null;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
-  }, [orgId, cameraId]);
+  }, [startStream]);
+
+  // Toggle between front and back camera
+  const toggleCamera = () => {
+    setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
+  };
 
   return (
     <div
@@ -115,23 +140,47 @@ export default function CameraNodePage({
             color: "white",
           }}
         >
-          {connected ? "Streaming" : "Disconnected"}
+          {connected ? "● Streaming" : "Disconnected"}
         </span>
       </header>
 
       <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
         {error && (
-          <p className="text-white text-center text-sm" style={{ color: COLORS.alertRed }}>
+          <p className="text-center text-sm" style={{ color: COLORS.alertRed }}>
             {error}
           </p>
         )}
-        <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black">
+        <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
           <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
         </div>
         <canvas ref={canvasRef} className="hidden" />
-        <div className="text-center text-white">
-          <p className="font-medium text-lg">{camera?.name ?? cameraId}</p>
-          <p className="text-sm text-white/70">{camera?.location ?? "Loading…"}</p>
+
+        {/* Camera info + controls */}
+        <div className="text-center text-white space-y-3">
+          <div>
+            <p className="font-medium text-lg">{camera?.name ?? cameraId}</p>
+            <p className="text-sm text-white/70">{camera?.location ?? "Loading…"}</p>
+          </div>
+
+          {/* Toggle camera button */}
+          <button
+            onClick={toggleCamera}
+            className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
+            style={{
+              backgroundColor: "rgba(255,255,255,0.12)",
+              color: "white",
+              border: "1px solid rgba(255,255,255,0.2)",
+            }}
+          >
+            🔄 Switch to {facingMode === "environment" ? "Front" : "Back"} Camera
+          </button>
+
+          {/* Frame counter */}
+          {connected && (
+            <p className="text-xs text-white/40">
+              {frameCount} frames sent
+            </p>
+          )}
         </div>
       </main>
     </div>

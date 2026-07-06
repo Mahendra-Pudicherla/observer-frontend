@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence, useInView } from "framer-motion";
 import { useSession } from "@/components/SessionProvider";
 import { useAlertSocket } from "@/hooks/useAlertSocket";
+import { useCameraFeed } from "@/hooks/useCameraFeed";
 import { DEMO_FLAG } from "@/components/SessionProvider";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -122,6 +123,96 @@ function IncidentBadge({ type }: { type: string }) {
     >
       {formatAnomalyType(type as Parameters<typeof formatAnomalyType>[0])}
     </span>
+  );
+}
+
+/* ── Live Camera Feed Card ── */
+function CameraFeedCard({
+  camera,
+  orgId,
+  isAlerting,
+  index,
+}: {
+  camera: Camera;
+  orgId: string;
+  isAlerting: boolean;
+  index: number;
+}) {
+  const { frame, live } = useCameraFeed(orgId, camera.id);
+
+  return (
+    <motion.div
+      key={camera.id}
+      initial={{ opacity: 0, scale: 0.96 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.4, delay: index * 0.06 }}
+      className="relative aspect-video rounded-2xl overflow-hidden scanlines"
+      style={{
+        backgroundColor: COLORS.midnight,
+        outline: isAlerting
+          ? `2px solid ${COLORS.alertRed}`
+          : "1px solid rgba(255,255,255,0.06)",
+        boxShadow: isAlerting
+          ? "0 0 24px rgba(220,38,38,0.25), 0 8px 24px rgba(0,0,0,0.3)"
+          : "0 8px 24px rgba(0,0,0,0.15)",
+        transition: "all 0.3s",
+      }}
+    >
+      {/* Live video frame */}
+      {frame && (
+        <img
+          src={frame}
+          alt={`Live feed from ${camera.name}`}
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
+
+      {/* Subtle gradient overlay */}
+      <div
+        className="absolute inset-0"
+        style={{
+          background: frame
+            ? "none"
+            : "radial-gradient(ellipse at 30% 30%, rgba(37,99,235,0.08) 0%, transparent 60%)",
+        }}
+      />
+
+      {/* ALERT badge */}
+      {isAlerting && (
+        <div
+          className="absolute top-2.5 left-2.5 text-white text-xs font-bold px-2 py-1 rounded-lg z-20 flex items-center gap-1"
+          style={{ backgroundColor: COLORS.alertRed }}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+          ALERT
+        </div>
+      )}
+
+      {/* LIVE / OFFLINE badge */}
+      <div
+        className="absolute top-2.5 right-2.5 text-white text-xs font-bold px-2 py-1 rounded-lg z-20 flex items-center gap-1.5"
+        style={{
+          backgroundColor: live
+            ? "rgba(22,163,74,0.85)"
+            : "rgba(100,116,139,0.85)",
+          backdropFilter: "blur(4px)",
+        }}
+      >
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${live ? "bg-white animate-pulse" : "bg-white/50"}`}
+        />
+        {live ? "LIVE" : "OFFLINE"}
+      </div>
+
+      {/* Bottom gradient overlay with label */}
+      <div
+        className="absolute bottom-0 left-0 right-0 p-3 z-20"
+        style={{ background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%)" }}
+      >
+        <p className="text-white text-sm font-bold leading-tight">{camera.name}</p>
+        <p className="text-white/60 text-xs mt-0.5">{camera.location}</p>
+      </div>
+    </motion.div>
   );
 }
 
@@ -303,65 +394,15 @@ export default function DashboardPage() {
                 <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>Add one from the Cameras page to start monitoring</p>
               </motion.div>
             ) : (
-              cameras.map((camera, i) => {
-                const isAlerting = alertingCameras.has(camera.id);
-                return (
-                  <motion.div
-                    key={camera.id}
-                    initial={{ opacity: 0, scale: 0.96 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.4, delay: i * 0.06 }}
-                    className="relative aspect-video rounded-2xl overflow-hidden scanlines"
-                    style={{
-                      backgroundColor: COLORS.midnight,
-                      outline: isAlerting
-                        ? `2px solid ${COLORS.alertRed}`
-                        : "1px solid rgba(255,255,255,0.06)",
-                      boxShadow: isAlerting
-                        ? "0 0 24px rgba(220,38,38,0.25), 0 8px 24px rgba(0,0,0,0.3)"
-                        : "0 8px 24px rgba(0,0,0,0.15)",
-                      transition: "all 0.3s",
-                    }}
-                  >
-                    {/* Subtle gradient overlay */}
-                    <div
-                      className="absolute inset-0"
-                      style={{
-                        background: "radial-gradient(ellipse at 30% 30%, rgba(37,99,235,0.08) 0%, transparent 60%)",
-                      }}
-                    />
-
-                    {/* ALERT badge */}
-                    {isAlerting && (
-                      <div
-                        className="absolute top-2.5 left-2.5 text-white text-xs font-bold px-2 py-1 rounded-lg z-20 flex items-center gap-1"
-                        style={{ backgroundColor: COLORS.alertRed }}
-                      >
-                        <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
-                        ALERT
-                      </div>
-                    )}
-
-                    {/* LIVE badge */}
-                    <div
-                      className="absolute top-2.5 right-2.5 text-white text-xs font-bold px-2 py-1 rounded-lg z-20 flex items-center gap-1.5"
-                      style={{ backgroundColor: "rgba(22,163,74,0.85)", backdropFilter: "blur(4px)" }}
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
-                      LIVE
-                    </div>
-
-                    {/* Bottom gradient overlay with label */}
-                    <div
-                      className="absolute bottom-0 left-0 right-0 p-3 z-20"
-                      style={{ background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%)" }}
-                    >
-                      <p className="text-white text-sm font-bold leading-tight">{camera.name}</p>
-                      <p className="text-white/60 text-xs mt-0.5">{camera.location}</p>
-                    </div>
-                  </motion.div>
-                );
-              })
+              cameras.map((camera, i) => (
+                <CameraFeedCard
+                  key={camera.id}
+                  camera={camera}
+                  orgId={org?.id ?? ""}
+                  isAlerting={alertingCameras.has(camera.id)}
+                  index={i}
+                />
+              ))
             )}
           </div>
         </div>
