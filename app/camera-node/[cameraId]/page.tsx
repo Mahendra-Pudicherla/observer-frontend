@@ -50,10 +50,17 @@ export default function CameraNodePage({
     if (!orgId) return;
     setError(null);
 
-    // Stop any existing stream
+    // Stop any existing stream and clean up to release camera hardware resources
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    // Give hardware some time to release
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -64,7 +71,11 @@ export default function CameraNodePage({
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn("Auto-play failed, browser might require user interaction:", playErr);
+        }
       }
 
       // Keep screen awake
@@ -81,9 +92,15 @@ export default function CameraNodePage({
         const wsUrl = `${BACKEND_WS_URL.replace(/^http/, "ws")}/ws/stream/${orgId}/${cameraId}`;
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
-        ws.onopen = () => setConnected(true);
+        ws.onopen = () => {
+          setConnected(true);
+          setError(null);
+        };
         ws.onclose = () => setConnected(false);
-        ws.onerror = () => setConnected(false);
+        ws.onerror = () => {
+          setConnected(false);
+          setError(`WebSocket connection error. Target URL: ${wsUrl}. Verify backend deployment and configuration.`);
+        };
       }
 
       // Clear old interval
@@ -151,7 +168,7 @@ export default function CameraNodePage({
           </p>
         )}
         <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
-          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted autoPlay />
         </div>
         <canvas ref={canvasRef} className="hidden" />
 
