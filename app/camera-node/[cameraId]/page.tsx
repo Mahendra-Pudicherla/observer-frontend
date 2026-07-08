@@ -5,6 +5,8 @@ import { Logo } from "@/components/Logo";
 import { BACKEND_WS_URL, COLORS, type Camera } from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
 
+type ConnectionStatus = "disconnected" | "connecting" | "connected";
+
 export default function CameraNodePage({
   params,
   searchParams,
@@ -20,9 +22,11 @@ export default function CameraNodePage({
   const wsRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const retryRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [camera, setCamera] = useState<Camera | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [frameCount, setFrameCount] = useState(0);
@@ -45,12 +49,57 @@ export default function CameraNodePage({
     void loadCamera();
   }, [orgId, cameraId, supabase]);
 
-  // Start camera + WebSocket stream
-  const startStream = useCallback(async () => {
+  // Connect WebSocket with retry logic
+  const connectWebSocket = useCallback(() => {
     if (!orgId) return;
+
+    // Clean up any existing connection
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // prevent retry loop from old close handler
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    setStatus("connecting");
+    const wsUrl = `${BACKEND_WS_URL.replace(/^http/, "ws")}/ws/stream/${orgId}/${cameraId}`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setStatus("connected");
+      setError(null);
+      retryRef.current = 0; // reset backoff on success
+    };
+
+    ws.onclose = () => {
+      setStatus("disconnected");
+      // Schedule reconnect with exponential backoff
+      const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
+      retryRef.current += 1;
+      retryTimerRef.current = setTimeout(() => {
+        connectWebSocket();
+      }, delay);
+    };
+
+    ws.onerror = () => {
+      // onerror is always followed by onclose, so reconnect happens there
+      setError(
+        retryRef.current === 0
+          ? `WebSocket connection error. Target URL: ${wsUrl}. Verify backend deployment and configuration.`
+          : `Connection lost. Retrying... (attempt ${retryRef.current + 1})`
+      );
+    };
+
+    ws.onmessage = () => {
+      // Ignore server pings — we only send frames, not receive
+    };
+  }, [orgId, cameraId]);
+
+  // Start camera hardware
+  const startCamera = useCallback(async () => {
     setError(null);
 
-    // Stop any existing stream and clean up to release camera hardware resources
+    // Stop any existing stream to release camera hardware
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -86,62 +135,76 @@ export default function CameraNodePage({
           // optional
         }
       }
-
-      // Connect WebSocket if not already connected
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        const wsUrl = `${BACKEND_WS_URL.replace(/^http/, "ws")}/ws/stream/${orgId}/${cameraId}`;
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-        ws.onopen = () => {
-          setConnected(true);
-          setError(null);
-        };
-        ws.onclose = () => setConnected(false);
-        ws.onerror = () => {
-          setConnected(false);
-          setError(`WebSocket connection error. Target URL: ${wsUrl}. Verify backend deployment and configuration.`);
-        };
-      }
-
-      // Clear old interval
-      if (intervalRef.current) clearInterval(intervalRef.current);
-
-      // Send frames at ~3 FPS
-      intervalRef.current = setInterval(() => {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        const ws = wsRef.current;
-        if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        ctx.drawImage(video, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-        ws.send(JSON.stringify({ frame: dataUrl }));
-        setFrameCount((c) => c + 1);
-      }, 300);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Camera access denied");
     }
-  }, [orgId, cameraId, facingMode]);
+  }, [facingMode]);
 
-  // Start stream on mount and when facingMode changes
+  // Frame sending interval — runs independently of WebSocket state
   useEffect(() => {
-    void startStream();
+    if (intervalRef.current) clearInterval(intervalRef.current);
+
+    // Send frames at ~3 FPS when WebSocket is connected
+    intervalRef.current = setInterval(() => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ws = wsRef.current;
+      if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+      ws.send(JSON.stringify({ frame: dataUrl }));
+      setFrameCount((c) => c + 1);
+    }, 300);
+
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      wsRef.current?.close();
-      wsRef.current = null;
+    };
+  }, []);
+
+  // Start camera and WebSocket on mount; restart camera on facingMode change
+  useEffect(() => {
+    void startCamera();
+    return () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
-  }, [startStream]);
+  }, [startCamera]);
+
+  // Manage WebSocket lifecycle separately
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent retry on intentional close
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connectWebSocket]);
 
   // Toggle between front and back camera
   const toggleCamera = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
   };
+
+  const statusLabel =
+    status === "connected"
+      ? "● Streaming"
+      : status === "connecting"
+        ? "Reconnecting…"
+        : "Disconnected";
+
+  const statusColor =
+    status === "connected"
+      ? COLORS.safeGreen
+      : status === "connecting"
+        ? COLORS.cautionAmber
+        : COLORS.alertRed;
 
   return (
     <div
@@ -153,11 +216,11 @@ export default function CameraNodePage({
         <span
           className="text-sm font-medium px-3 py-1.5 rounded-full"
           style={{
-            backgroundColor: connected ? COLORS.safeGreen : COLORS.alertRed,
+            backgroundColor: statusColor,
             color: "white",
           }}
         >
-          {connected ? "● Streaming" : "Disconnected"}
+          {statusLabel}
         </span>
       </header>
 
@@ -193,7 +256,7 @@ export default function CameraNodePage({
           </button>
 
           {/* Frame counter */}
-          {connected && (
+          {status === "connected" && (
             <p className="text-xs text-white/40">
               {frameCount} frames sent
             </p>
@@ -203,3 +266,4 @@ export default function CameraNodePage({
     </div>
   );
 }
+
