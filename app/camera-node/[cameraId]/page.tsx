@@ -27,14 +27,15 @@ export default function CameraNodePage({
 
   const [camera, setCamera] = useState<Camera | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
-  const [error, setError] = useState<string | null>(null);
+  const [wsError, setWsError] = useState<string | null>(null);
+  const [camError, setCamError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [frameCount, setFrameCount] = useState(0);
 
   // Load camera metadata
   useEffect(() => {
     if (!orgId || !cameraId) {
-      setError("Missing orgId query parameter.");
+      setCamError("Missing orgId query parameter.");
       return;
     }
     const loadCamera = async () => {
@@ -55,7 +56,7 @@ export default function CameraNodePage({
 
     // Clean up any existing connection
     if (wsRef.current) {
-      wsRef.current.onclose = null; // prevent retry loop from old close handler
+      wsRef.current.onclose = null;
       wsRef.current.close();
       wsRef.current = null;
     }
@@ -67,13 +68,12 @@ export default function CameraNodePage({
 
     ws.onopen = () => {
       setStatus("connected");
-      setError(null);
-      retryRef.current = 0; // reset backoff on success
+      setWsError(null);
+      retryRef.current = 0;
     };
 
     ws.onclose = () => {
       setStatus("disconnected");
-      // Schedule reconnect with exponential backoff
       const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
       retryRef.current += 1;
       retryTimerRef.current = setTimeout(() => {
@@ -82,8 +82,7 @@ export default function CameraNodePage({
     };
 
     ws.onerror = () => {
-      // onerror is always followed by onclose, so reconnect happens there
-      setError(
+      setWsError(
         retryRef.current === 0
           ? `WebSocket connection error. Target URL: ${wsUrl}. Verify backend deployment and configuration.`
           : `Connection lost. Retrying... (attempt ${retryRef.current + 1})`
@@ -95,9 +94,9 @@ export default function CameraNodePage({
     };
   }, [orgId, cameraId]);
 
-  // Start camera hardware
+  // Start camera hardware with fallback
   const startCamera = useCallback(async () => {
-    setError(null);
+    setCamError(null);
 
     // Stop any existing stream to release camera hardware
     if (streamRef.current) {
@@ -108,35 +107,53 @@ export default function CameraNodePage({
       videoRef.current.srcObject = null;
     }
 
-    // Give hardware some time to release
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Give hardware time to release (important on Android)
+    await new Promise((resolve) => setTimeout(resolve, 400));
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode } },
-        audio: false,
-      });
-      streamRef.current = stream;
+    // Try multiple constraint strategies for camera access
+    const constraintAttempts: MediaStreamConstraints[] = [
+      // 1. Exact facing mode (most reliable for camera selection)
+      { video: { facingMode: { exact: facingMode } }, audio: false },
+      // 2. Ideal facing mode (fallback if exact fails)
+      { video: { facingMode: { ideal: facingMode } }, audio: false },
+      // 3. Any available camera (last resort)
+      { video: true, audio: false },
+    ];
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        try {
-          await videoRef.current.play();
-        } catch (playErr) {
-          console.warn("Auto-play failed, browser might require user interaction:", playErr);
-        }
+    let stream: MediaStream | null = null;
+    for (const constraints of constraintAttempts) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        break; // success
+      } catch {
+        // try next constraint set
       }
+    }
 
-      // Keep screen awake
-      if ("wakeLock" in navigator) {
-        try {
-          await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<unknown> } }).wakeLock.request("screen");
-        } catch {
-          // optional
-        }
+    if (!stream) {
+      setCamError("Camera access denied. Please allow camera permissions and reload.");
+      return;
+    }
+
+    streamRef.current = stream;
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      // Wait for video metadata to be ready before playing
+      videoRef.current.onloadedmetadata = () => {
+        videoRef.current?.play().catch((playErr) => {
+          console.warn("Auto-play failed:", playErr);
+        });
+      };
+    }
+
+    // Keep screen awake
+    if ("wakeLock" in navigator) {
+      try {
+        await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<unknown> } }).wakeLock.request("screen");
+      } catch {
+        // optional
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Camera access denied");
     }
   }, [facingMode]);
 
@@ -144,15 +161,15 @@ export default function CameraNodePage({
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
 
-    // Send frames at ~3 FPS when WebSocket is connected
     intervalRef.current = setInterval(() => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       const ws = wsRef.current;
       if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!video.videoWidth || !video.videoHeight) return; // video not ready yet
 
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.drawImage(video, 0, 0);
@@ -166,7 +183,7 @@ export default function CameraNodePage({
     };
   }, []);
 
-  // Start camera and WebSocket on mount; restart camera on facingMode change
+  // Start camera on mount and when facingMode changes
   useEffect(() => {
     void startCamera();
     return () => {
@@ -180,7 +197,7 @@ export default function CameraNodePage({
     return () => {
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent retry on intentional close
+        wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;
       }
@@ -191,6 +208,8 @@ export default function CameraNodePage({
   const toggleCamera = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
   };
+
+  const displayError = camError || wsError;
 
   const statusLabel =
     status === "connected"
@@ -225,9 +244,9 @@ export default function CameraNodePage({
       </header>
 
       <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
-        {error && (
+        {displayError && (
           <p className="text-center text-sm" style={{ color: COLORS.alertRed }}>
-            {error}
+            {displayError}
           </p>
         )}
         <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
