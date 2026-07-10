@@ -38,24 +38,24 @@ export const PRICING_TIERS = {
   starter: {
     name: "Starter",
     features: [
-      "Up to 3 camera nodes",
+      "Unlimited camera nodes",
       "Live multi-camera dashboard",
       "AI anomaly detection (fight, fall, loitering, crowd surge)",
       "Pre-buffer incident auto-clipping",
-      "7-day incident clip storage",
-      "Email alerts (1 recipient)",
+      "Incident clip storage",
+      "Email alerts",
     ],
   },
   growth: {
     name: "Growth",
     recommended: true,
     features: [
-      "Up to 15 camera nodes",
+      "Unlimited camera nodes",
       "Everything in Starter, plus:",
-      "30-day incident clip storage",
-      "Email alerts (up to 10 recipients)",
+      "Extended incident clip storage",
+      "Email alerts (multiple recipients)",
       "Auto-generated PDF incident reports",
-      "Up to 5 dashboard users with roles",
+      "Unlimited dashboard users with roles",
     ],
   },
   enterprise: {
@@ -63,11 +63,11 @@ export const PRICING_TIERS = {
     features: [
       "Unlimited camera nodes",
       "Everything in Growth, plus:",
-      "1-year incident clip storage",
+      "Extended incident clip storage",
       "Unlimited dashboard users",
-      "Priority alert escalation (SMS/call) — UI only",
-      "Dedicated control room integration — UI only",
-      "API access — UI only",
+      "Priority alert escalation (SMS/call)",
+      "Dedicated control room integration",
+      "API access",
     ],
   },
 } as const;

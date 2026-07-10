@@ -458,7 +458,7 @@ export default function LandingPage() {
                 <p className="text-sm font-semibold uppercase tracking-widest mb-3" style={{ color: "#60a5fa" }}>Transparent pricing</p>
                 <h2 className="text-4xl font-extrabold text-white mb-4">Starter, Growth &amp; Enterprise</h2>
                 <p className="text-lg mb-8" style={{ color: "rgba(255,255,255,0.6)" }}>
-                  {Object.keys(PRICING_TIERS).length} tiers — from 3 cameras to unlimited. No payment processor at launch.
+                  {Object.keys(PRICING_TIERS).length} tiers — unlimited cameras on every plan. No payment processor at launch.
                 </p>
                 <Button
                   asChild
