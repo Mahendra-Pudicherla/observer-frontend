@@ -68,16 +68,37 @@ export function useOrgIncidents(limit = 50) {
     }
     setLoading(true);
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("incidents")
         .select("*")
         .eq("org_id", org.id)
         .order("created_at", { ascending: false })
         .limit(limit);
-      setIncidents((data as Incident[]) ?? []);
+      if (error) throw error;
+      if (data && data.length > 0) {
+        setIncidents(data as Incident[]);
+        return;
+      }
+      // Fallback to backend API (service role) if RLS returns empty
+      const res = await fetch(`${BACKEND_API_URL}/incidents/${org.id}`);
+      if (res.ok) {
+        const rows = (await res.json()) as Incident[];
+        setIncidents(rows.slice(0, limit));
+      } else {
+        setIncidents((data as Incident[]) ?? []);
+      }
     } catch (e) {
       console.error("Load incidents error:", e);
-      setIncidents([]);
+      try {
+        const res = await fetch(`${BACKEND_API_URL}/incidents/${org.id}`);
+        if (res.ok) {
+          setIncidents(((await res.json()) as Incident[]).slice(0, limit));
+        } else {
+          setIncidents([]);
+        }
+      } catch {
+        setIncidents([]);
+      }
     } finally {
       setLoading(false);
     }

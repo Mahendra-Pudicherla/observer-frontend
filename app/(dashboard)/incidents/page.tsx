@@ -395,12 +395,23 @@ export default function IncidentsPage() {
                     <p className="text-xs font-semibold mb-2" style={{ color: COLORS.textMuted }}>
                       Incident Clip
                     </p>
-                    <video
-                      src={selected.clip_url}
-                      controls
-                      className="w-full rounded-xl"
-                      style={{ backgroundColor: COLORS.midnight }}
-                    />
+                    {/\.(jpe?g|png|webp)(\?|$)/i.test(selected.clip_url) ||
+                    selected.clip_url.includes("snapshot") ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={selected.clip_url}
+                        alt="Incident snapshot"
+                        className="w-full rounded-xl object-contain"
+                        style={{ backgroundColor: COLORS.midnight, maxHeight: 360 }}
+                      />
+                    ) : (
+                      <video
+                        src={selected.clip_url}
+                        controls
+                        className="w-full rounded-xl"
+                        style={{ backgroundColor: COLORS.midnight }}
+                      />
+                    )}
                     <a
                       href={selected.clip_url}
                       target="_blank"
