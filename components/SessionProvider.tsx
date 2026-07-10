@@ -79,7 +79,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const init = async () => {
-      // Check demo mode first
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      // Prefer a real signed-in session over leftover demo mode
+      if (session?.user) {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(DEMO_FLAG);
+        }
+        setIsDemo(false);
+        setUserId(session.user.id);
+        await refreshOrg();
+        setLoading(false);
+        return;
+      }
+
       if (typeof window !== "undefined" && localStorage.getItem(DEMO_FLAG) === "1") {
         setIsDemo(true);
         setUserId("demo-user-001");
@@ -88,13 +103,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      setUserId(session?.user?.id ?? null);
-      if (session?.user) {
-        await refreshOrg();
-      }
+      setUserId(null);
       setLoading(false);
     };
 
@@ -103,14 +112,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      // Don't interfere with demo mode
-      if (typeof window !== "undefined" && localStorage.getItem(DEMO_FLAG) === "1") return;
-      setUserId(session?.user?.id ?? null);
       if (session?.user) {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(DEMO_FLAG);
+        }
+        setIsDemo(false);
+        setUserId(session.user.id);
         void refreshOrg();
-      } else {
-        setOrg(null);
+        return;
       }
+
+      if (typeof window !== "undefined" && localStorage.getItem(DEMO_FLAG) === "1") {
+        setIsDemo(true);
+        setUserId("demo-user-001");
+        setOrg(DEMO_ORG);
+        return;
+      }
+
+      setUserId(null);
+      setOrg(null);
+      setIsDemo(false);
     });
 
     return () => subscription.unsubscribe();

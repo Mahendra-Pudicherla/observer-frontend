@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -8,21 +9,37 @@ import {
   FileText,
   LayoutDashboard,
   Settings,
-  CreditCard,
   LogOut,
-  ChevronRight,
+  MonitorPlay,
+  Brain,
+  Siren,
+  Map,
+  FileBarChart2,
+  Users,
+  PanelLeftClose,
+  PanelLeft,
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
-import { SessionProvider, useRequireAuth, useSession, exitDemoMode } from "@/components/SessionProvider";
+import {
+  SessionProvider,
+  useRequireAuth,
+  useSession,
+  exitDemoMode,
+} from "@/components/SessionProvider";
 import { COLORS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/cameras", label: "Cameras", icon: Camera },
+  { href: "/live", label: "Live Monitoring", icon: MonitorPlay },
+  { href: "/ai-analysis", label: "AI Analysis", icon: Brain },
+  { href: "/alerts", label: "Alerts", icon: Siren },
   { href: "/incidents", label: "Incidents", icon: FileText },
-  { href: "/billing", label: "Billing", icon: CreditCard },
+  { href: "/cameras", label: "Cameras", icon: Camera },
+  { href: "/maps", label: "Maps", icon: Map },
+  { href: "/reports", label: "Reports", icon: FileBarChart2 },
+  { href: "/users", label: "Users", icon: Users },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -32,6 +49,7 @@ function DashboardChrome({ children }: { children: React.ReactNode }) {
   const { loading } = useRequireAuth();
   const { org, isDemo } = useSession();
   const supabase = createClient();
+  const [collapsed, setCollapsed] = useState(false);
 
   const handleSignOut = async () => {
     exitDemoMode();
@@ -39,17 +57,20 @@ function DashboardChrome({ children }: { children: React.ReactNode }) {
     router.push("/login");
   };
 
+  const activeLabel =
+    navItems.find((n) => pathname === n.href || pathname.startsWith(`${n.href}/`))
+      ?.label ?? "Dashboard";
+
   if (loading) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"
-        style={{ backgroundColor: COLORS.surface }}
+        style={{ backgroundColor: COLORS.bg }}
       >
-        {/* Skeleton shimmer */}
         <div className="flex flex-col items-center gap-4">
           <div
             className="w-12 h-12 rounded-xl animate-pulse"
-            style={{ background: "linear-gradient(135deg, #0f1923, #1e3a5f)" }}
+            style={{ background: "linear-gradient(135deg, #1a1f2e, #2563eb55)" }}
           />
           <div className="flex gap-1">
             {[...Array(3)].map((_, i) => (
@@ -66,23 +87,29 @@ function DashboardChrome({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen flex" style={{ backgroundColor: COLORS.surface, fontFamily: "Plus Jakarta Sans, system-ui, sans-serif" }}>
-      {/* ── Sidebar ── */}
+    <div
+      className="min-h-screen flex"
+      style={{
+        backgroundColor: COLORS.bg,
+        fontFamily: "Plus Jakarta Sans, system-ui, sans-serif",
+        color: COLORS.text,
+      }}
+    >
       <aside
-        className="w-16 flex flex-col items-center py-4 gap-1 shrink-0 relative z-20"
+        className={cn(
+          "flex flex-col py-4 shrink-0 relative z-20 transition-all duration-300",
+          collapsed ? "w-[72px] px-2" : "w-56 px-3"
+        )}
         style={{
-          backgroundColor: "white",
-          borderRight: "1px solid rgba(0,0,0,0.06)",
-          boxShadow: "2px 0 12px rgba(0,0,0,0.04)",
+          backgroundColor: COLORS.panel,
+          borderRight: `1px solid ${COLORS.border}`,
         }}
       >
-        {/* Logo icon only */}
-        <div className="mb-5 mt-1">
-          <Logo size="sm" showWordmark={false} />
+        <div className={cn("mb-6 mt-1", collapsed ? "flex justify-center" : "px-2")}>
+          <Logo size="sm" showWordmark={!collapsed} dark />
         </div>
 
-        {/* Nav items */}
-        <div className="flex flex-col items-center gap-1 flex-1 w-full px-2">
+        <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto">
           {navItems.map(({ href, label, icon: Icon }) => {
             const active = pathname === href || pathname.startsWith(`${href}/`);
             return (
@@ -91,80 +118,89 @@ function DashboardChrome({ children }: { children: React.ReactNode }) {
                 href={href}
                 title={label}
                 className={cn(
-                  "group relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200",
-                  active ? "shadow-sm" : "hover:bg-slate-50"
+                  "group relative flex items-center gap-3 rounded-xl transition-all duration-200",
+                  collapsed ? "h-10 w-10 justify-center mx-auto" : "h-10 px-3"
                 )}
                 style={{
-                  backgroundColor: active ? COLORS.blueTint : undefined,
-                  color: active ? COLORS.signalBlue : COLORS.slate,
+                  backgroundColor: active ? "rgba(59,130,246,0.15)" : undefined,
+                  color: active ? COLORS.signalBlue : COLORS.textMuted,
                 }}
               >
-                {/* Active indicator bar */}
-                {active && (
+                {active && !collapsed && (
                   <span
-                    className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r-full"
+                    className="absolute right-2 h-1.5 w-1.5 rounded-full"
                     style={{ backgroundColor: COLORS.signalBlue }}
                   />
                 )}
-                <Icon className="h-[18px] w-[18px] transition-transform duration-200 group-hover:scale-110" />
-
-                {/* Tooltip */}
-                <span
-                  className="absolute left-14 px-2 py-1 rounded-lg text-xs font-semibold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 translate-x-1 group-hover:translate-x-0 z-50"
-                  style={{ backgroundColor: COLORS.midnight }}
-                >
-                  {label}
-                  <span
-                    className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 rotate-45"
-                    style={{ backgroundColor: COLORS.midnight }}
-                  />
-                </span>
+                <Icon className="h-[18px] w-[18px] shrink-0" />
+                {!collapsed && (
+                  <span className="text-sm font-medium truncate">{label}</span>
+                )}
               </Link>
             );
           })}
-        </div>
+        </nav>
 
-        {/* Sign out */}
-        <button
-          onClick={handleSignOut}
-          title="Sign out"
-          className="group relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 hover:bg-red-50 mb-1"
-          style={{ color: "#94a3b8" }}
-        >
-          <LogOut className="h-[18px] w-[18px] transition-all duration-200 group-hover:text-red-500" />
-          <span
-            className="absolute left-14 px-2 py-1 rounded-lg text-xs font-semibold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 z-50"
-            style={{ backgroundColor: COLORS.midnight }}
+        <div className="mt-3 space-y-1">
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
+            className={cn(
+              "flex items-center gap-3 rounded-xl transition-all w-full",
+              collapsed ? "h-10 w-10 justify-center mx-auto" : "h-10 px-3"
+            )}
+            style={{ color: COLORS.textMuted }}
+            title={collapsed ? "Expand" : "Collapse"}
           >
-            Sign out
-          </span>
-        </button>
+            {collapsed ? (
+              <PanelLeft className="h-[18px] w-[18px]" />
+            ) : (
+              <>
+                <PanelLeftClose className="h-[18px] w-[18px]" />
+                <span className="text-sm font-medium">Collapse</span>
+              </>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className={cn(
+              "flex items-center gap-3 rounded-xl transition-all w-full hover:bg-red-500/10",
+              collapsed ? "h-10 w-10 justify-center mx-auto" : "h-10 px-3"
+            )}
+            style={{ color: COLORS.textMuted }}
+            title="Sign out"
+          >
+            <LogOut className="h-[18px] w-[18px]" />
+            {!collapsed && <span className="text-sm font-medium">Sign out</span>}
+          </button>
+        </div>
       </aside>
 
-      {/* ── Main area ── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar */}
         <header
           className="h-14 flex items-center justify-between px-6 shrink-0"
           style={{
-            backgroundColor: "white",
-            borderBottom: "1px solid rgba(0,0,0,0.06)",
-            boxShadow: "0 1px 8px rgba(0,0,0,0.04)",
+            backgroundColor: COLORS.panel,
+            borderBottom: `1px solid ${COLORS.border}`,
           }}
         >
           <div className="flex items-center gap-3">
             <div className="hidden sm:block">
-              <p className="font-bold text-sm leading-tight" style={{ color: COLORS.midnight }}>
+              <p className="font-bold text-sm leading-tight" style={{ color: COLORS.text }}>
                 {org?.name ?? "Organisation"}
               </p>
-              <p className="text-xs capitalize" style={{ color: COLORS.slate }}>
-                {org?.plan ?? "starter"} plan
+              <p className="text-xs capitalize" style={{ color: COLORS.textMuted }}>
+                {org?.plan ?? "starter"} plan · {activeLabel}
               </p>
             </div>
             {isDemo && (
               <span
-                className="hidden sm:inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full"
-                style={{ backgroundColor: "#fef3c7", color: "#d97706", border: "1px solid #fde68a" }}
+                className="hidden sm:inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-full"
+                style={{
+                  backgroundColor: "rgba(245,158,11,0.15)",
+                  color: COLORS.cautionAmber,
+                }}
               >
                 DEMO
               </span>
@@ -172,42 +208,38 @@ function DashboardChrome({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Breadcrumb */}
-            <div className="hidden md:flex items-center gap-1 text-xs" style={{ color: COLORS.slate }}>
-              <span>Observer</span>
-              <ChevronRight className="h-3 w-3" />
-              <span className="font-semibold capitalize" style={{ color: COLORS.midnight }}>
-                {pathname.replace("/", "") || "Dashboard"}
-              </span>
-            </div>
-
-            <div className="w-px h-5 mx-1 hidden md:block" style={{ backgroundColor: "#e2e8f0" }} />
-
-            {/* Live badge */}
             <span
               className="hidden sm:flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full"
-              style={{ backgroundColor: "#f0fdf4", color: COLORS.safeGreen }}
+              style={{
+                backgroundColor: "rgba(34,197,94,0.12)",
+                color: COLORS.safeGreen,
+              }}
             >
               <span className="relative flex h-1.5 w-1.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: COLORS.safeGreen }} />
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5" style={{ backgroundColor: COLORS.safeGreen }} />
+                <span
+                  className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                  style={{ backgroundColor: COLORS.safeGreen }}
+                />
+                <span
+                  className="relative inline-flex rounded-full h-1.5 w-1.5"
+                  style={{ backgroundColor: COLORS.safeGreen }}
+                />
               </span>
               Live
             </span>
 
-            {/* Bell */}
-            <button
-              className="relative h-8 w-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-50"
-              style={{ color: COLORS.slate }}
+            <Link
+              href="/alerts"
+              className="relative h-8 w-8 flex items-center justify-center rounded-lg transition-colors hover:bg-white/5"
+              style={{ color: COLORS.textMuted }}
             >
               <Bell className="h-4 w-4" />
-            </button>
+            </Link>
 
-            {/* Settings shortcut */}
             <Link
               href="/settings"
-              className="h-8 w-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-50"
-              style={{ color: COLORS.slate }}
+              className="h-8 w-8 flex items-center justify-center rounded-lg transition-colors hover:bg-white/5"
+              style={{ color: COLORS.textMuted }}
             >
               <Settings className="h-4 w-4" />
             </Link>
@@ -231,4 +263,3 @@ export default function DashboardLayout({
     </SessionProvider>
   );
 }
-

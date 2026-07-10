@@ -1,15 +1,22 @@
-/** Observer design tokens — locked per .cursorrules Section 7 */
+/** Observer design tokens */
 
 export const COLORS = {
   midnight: "#0F1923",
-  signalBlue: "#2563EB",
-  alertRed: "#DC2626",
-  safeGreen: "#16A34A",
+  signalBlue: "#3B82F6",
+  alertRed: "#EF4444",
+  safeGreen: "#22C55E",
   cautionAmber: "#F59E0B",
   surface: "#F8FAFC",
   slate: "#64748B",
   alertBg: "#FFF5F5",
   blueTint: "#EFF6FF",
+  // Dark ops shell
+  bg: "#0B0E14",
+  panel: "#12161F",
+  panelElevated: "#1A1F2E",
+  border: "rgba(255,255,255,0.08)",
+  text: "#F1F5F9",
+  textMuted: "#94A3B8",
 } as const;
 
 export const BACKEND_API_URL =
@@ -122,4 +129,37 @@ export interface Organization {
 
 export function formatAnomalyType(type: AnomalyType): string {
   return type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export function anomalySeverity(
+  type: AnomalyType
+): "critical" | "high" | "medium" | "low" {
+  switch (type) {
+    case "FIGHT_DETECTED":
+      return "critical";
+    case "CROWD_SURGE":
+      return "high";
+    case "PERSON_FALLEN":
+      return "medium";
+    case "LOITERING_DETECTED":
+      return "low";
+  }
+}
+
+export interface MovementSnapshot {
+  eastbound: number;
+  southbound: number;
+  reverse: number;
+}
+
+export interface AnalysisSnapshot {
+  org_id: string;
+  timestamp: string;
+  grid_cols: number;
+  grid_rows: number;
+  grid: number[][];
+  total_people: number;
+  movement: MovementSnapshot;
+  peak_density: number;
+  cameras_reporting: number;
 }

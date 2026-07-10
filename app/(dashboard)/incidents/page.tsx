@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSession } from "@/components/SessionProvider";
+import { PageHeader } from "@/components/dashboard/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -37,10 +38,10 @@ const ANOMALY_TYPES: AnomalyType[] = [
 ];
 
 const BADGE_STYLES: Record<AnomalyType, { bg: string; text: string; border: string }> = {
-  FIGHT_DETECTED: { bg: "#fee2e2", text: "#dc2626", border: "#fecaca" },
-  LOITERING_DETECTED: { bg: "#fef3c7", text: "#d97706", border: "#fde68a" },
-  PERSON_FALLEN: { bg: "#eff6ff", text: "#2563eb", border: "#bfdbfe" },
-  CROWD_SURGE: { bg: "#fff7ed", text: "#ea580c", border: "#fed7aa" },
+  FIGHT_DETECTED: { bg: "rgba(239,68,68,0.15)", text: "#F87171", border: "rgba(239,68,68,0.3)" },
+  LOITERING_DETECTED: { bg: "rgba(245,158,11,0.15)", text: "#FBBF24", border: "rgba(245,158,11,0.3)" },
+  PERSON_FALLEN: { bg: "rgba(59,130,246,0.15)", text: "#60A5FA", border: "rgba(59,130,246,0.3)" },
+  CROWD_SURGE: { bg: "rgba(249,115,22,0.15)", text: "#FB923C", border: "rgba(249,115,22,0.3)" },
 };
 
 function IncidentTypeBadge({ type }: { type: AnomalyType }) {
@@ -77,7 +78,9 @@ export default function IncidentsPage() {
     setCameras((cameraRows as Camera[]) ?? []);
   };
 
-  useEffect(() => { void load(); }, [org?.id, filterCamera, filterType, filterReviewed]);
+  useEffect(() => {
+    void load();
+  }, [org?.id, filterCamera, filterType, filterReviewed]);
 
   const markReviewed = async (incident: Incident) => {
     if (!org?.id) return;
@@ -86,73 +89,69 @@ export default function IncidentsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reviewed: true }),
     });
-    await supabase.from("incidents").update({ reviewed: true })
-      .eq("id", incident.id).eq("org_id", org.id);
+    await supabase
+      .from("incidents")
+      .update({ reviewed: true })
+      .eq("id", incident.id)
+      .eq("org_id", org.id);
     setSelected(null);
     await load();
   };
 
   const cameraLocation = (id: string) => cameras.find((c) => c.id === id)?.location ?? "—";
-
   const unreviewedCount = incidents.filter((i) => !i.reviewed).length;
 
   return (
-    <div className="space-y-6" style={{ fontFamily: "Plus Jakarta Sans, system-ui, sans-serif" }}>
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-extrabold" style={{ color: COLORS.midnight }}>Incidents</h1>
-          <p className="text-sm mt-0.5" style={{ color: COLORS.slate }}>
-            {unreviewedCount > 0 ? (
-              <span>
-                <span className="font-semibold" style={{ color: COLORS.alertRed }}>{unreviewedCount} unreviewed</span>
-                {" "}&middot; {incidents.length} total
-              </span>
-            ) : (
-              <span>{incidents.length} incidents</span>
-            )}
-          </p>
-        </div>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Incidents"
+        description={
+          unreviewedCount > 0
+            ? `${unreviewedCount} unreviewed · ${incidents.length} total`
+            : `${incidents.length} incidents`
+        }
+      />
 
-      {/* Filter bar */}
       <div
         className="flex flex-wrap items-center gap-3 p-4 rounded-2xl"
-        style={{ backgroundColor: "white", border: "1px solid rgba(0,0,0,0.05)", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
+        style={{ backgroundColor: COLORS.panel, border: `1px solid ${COLORS.border}` }}
       >
-        <div className="flex items-center gap-1.5 text-xs font-semibold mr-1" style={{ color: COLORS.slate }}>
+        <div className="flex items-center gap-1.5 text-xs font-semibold mr-1" style={{ color: COLORS.textMuted }}>
           <Filter className="h-3.5 w-3.5" /> Filters
         </div>
 
-        {/* Camera filter */}
         <div className="relative">
           <select
-            className="appearance-none pl-3 pr-7 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer"
+            className="appearance-none pl-3 pr-7 py-1.5 rounded-xl text-xs font-semibold border cursor-pointer"
             style={{
-              borderColor: filterCamera ? COLORS.signalBlue : "#e2e8f0",
-              backgroundColor: filterCamera ? COLORS.blueTint : "white",
-              color: filterCamera ? COLORS.signalBlue : COLORS.slate,
+              borderColor: filterCamera ? COLORS.signalBlue : COLORS.border,
+              backgroundColor: COLORS.panelElevated,
+              color: filterCamera ? COLORS.signalBlue : COLORS.textMuted,
             }}
             value={filterCamera}
             onChange={(e) => setFilterCamera(e.target.value)}
           >
             <option value="">All cameras</option>
             {cameras.map((c) => (
-              <option key={c.id} value={c.id}>{c.id}</option>
+              <option key={c.id} value={c.id}>
+                {c.id}
+              </option>
             ))}
           </select>
-          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 pointer-events-none" style={{ color: filterCamera ? COLORS.signalBlue : COLORS.slate }} />
+          <ChevronDown
+            className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 pointer-events-none"
+            style={{ color: COLORS.textMuted }}
+          />
         </div>
 
-        {/* Type filter pills */}
         <div className="flex flex-wrap gap-1.5">
           <button
             onClick={() => setFilterType("")}
-            className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all"
+            className="px-3 py-1.5 rounded-xl text-xs font-semibold border"
             style={{
-              backgroundColor: filterType === "" ? COLORS.midnight : "white",
-              color: filterType === "" ? "white" : COLORS.slate,
-              border: `1px solid ${filterType === "" ? COLORS.midnight : "#e2e8f0"}`,
+              backgroundColor: filterType === "" ? COLORS.signalBlue : COLORS.panelElevated,
+              color: filterType === "" ? "#fff" : COLORS.textMuted,
+              borderColor: filterType === "" ? COLORS.signalBlue : COLORS.border,
             }}
           >
             All types
@@ -164,11 +163,11 @@ export default function IncidentsPage() {
               <button
                 key={t}
                 onClick={() => setFilterType(active ? "" : t)}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border"
+                className="px-3 py-1.5 rounded-xl text-xs font-semibold border"
                 style={{
-                  backgroundColor: active ? s.bg : "white",
-                  color: active ? s.text : COLORS.slate,
-                  borderColor: active ? s.border : "#e2e8f0",
+                  backgroundColor: active ? s.bg : COLORS.panelElevated,
+                  color: active ? s.text : COLORS.textMuted,
+                  borderColor: active ? s.border : COLORS.border,
                 }}
               >
                 {formatAnomalyType(t)}
@@ -177,7 +176,6 @@ export default function IncidentsPage() {
           })}
         </div>
 
-        {/* Reviewed filter */}
         <div className="flex gap-1.5 ml-auto">
           {(["", "false", "true"] as const).map((v) => {
             const labels = { "": "All", false: "Unreviewed", true: "Reviewed" };
@@ -186,11 +184,11 @@ export default function IncidentsPage() {
               <button
                 key={v}
                 onClick={() => setFilterReviewed(v)}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border"
+                className="px-3 py-1.5 rounded-xl text-xs font-semibold border"
                 style={{
-                  backgroundColor: active ? COLORS.midnight : "white",
-                  color: active ? "white" : COLORS.slate,
-                  borderColor: active ? COLORS.midnight : "#e2e8f0",
+                  backgroundColor: active ? COLORS.signalBlue : COLORS.panelElevated,
+                  color: active ? "#fff" : COLORS.textMuted,
+                  borderColor: active ? COLORS.signalBlue : COLORS.border,
                 }}
               >
                 {labels[v]}
@@ -200,27 +198,30 @@ export default function IncidentsPage() {
         </div>
       </div>
 
-      {/* Incidents table */}
       <div
-        className="bg-white rounded-2xl overflow-hidden"
-        style={{ border: "1px solid rgba(0,0,0,0.05)", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}
+        className="rounded-2xl overflow-hidden"
+        style={{ backgroundColor: COLORS.panel, border: `1px solid ${COLORS.border}` }}
       >
         {incidents.length === 0 ? (
           <div className="py-20 text-center">
-            <Activity className="h-10 w-10 mx-auto mb-3" style={{ color: "#e2e8f0" }} />
-            <p className="font-bold text-sm" style={{ color: COLORS.slate }}>No incidents found</p>
-            <p className="text-xs mt-1" style={{ color: "#94a3b8" }}>Adjust filters or wait for AI to detect an event</p>
+            <Activity className="h-10 w-10 mx-auto mb-3" style={{ color: COLORS.textMuted }} />
+            <p className="font-bold text-sm" style={{ color: COLORS.text }}>
+              No incidents found
+            </p>
+            <p className="text-xs mt-1" style={{ color: COLORS.textMuted }}>
+              Adjust filters or wait for AI to detect an event
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm border-collapse">
               <thead>
-                <tr style={{ borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+                <tr style={{ borderBottom: `1px solid ${COLORS.border}` }}>
                   {["Type", "Camera", "Location", "Time", "Confidence", "Status"].map((h) => (
                     <th
                       key={h}
                       className="text-left px-4 py-3 text-xs font-bold uppercase tracking-wider"
-                      style={{ color: COLORS.slate }}
+                      style={{ color: COLORS.textMuted }}
                     >
                       {h}
                     </th>
@@ -235,59 +236,63 @@ export default function IncidentsPage() {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ delay: i * 0.03 }}
-                      className="cursor-pointer transition-colors hover:bg-slate-50/80 group"
-                      style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}
+                      className="cursor-pointer transition-colors hover:bg-white/[0.03]"
+                      style={{ borderBottom: `1px solid ${COLORS.border}` }}
                       onClick={() => setSelected(incident)}
                     >
-                      {/* Left-border accent by type */}
-                      <td className="px-4 py-3 relative">
-                        <div
-                          className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r-full opacity-0 group-hover:opacity-100 transition-opacity"
-                          style={{ backgroundColor: BADGE_STYLES[incident.type]?.text ?? COLORS.signalBlue }}
-                        />
+                      <td className="px-4 py-3">
                         <IncidentTypeBadge type={incident.type} />
                       </td>
-                      <td className="px-4 py-3 font-semibold text-xs" style={{ color: COLORS.midnight }}>
+                      <td className="px-4 py-3 font-semibold text-xs" style={{ color: COLORS.text }}>
                         {incident.camera_id}
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: COLORS.slate }}>
+                      <td className="px-4 py-3 text-xs" style={{ color: COLORS.textMuted }}>
                         <span className="flex items-center gap-1">
                           <MapPin className="h-3 w-3 shrink-0" />
                           {cameraLocation(incident.camera_id)}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-xs" style={{ color: COLORS.slate }}>
+                      <td className="px-4 py-3 text-xs" style={{ color: COLORS.textMuted }}>
                         <span className="flex items-center gap-1">
                           <Clock className="h-3 w-3 shrink-0" />
-                          {incident.created_at ? new Date(incident.created_at).toLocaleString() : "—"}
+                          {incident.created_at
+                            ? new Date(incident.created_at).toLocaleString()
+                            : "—"}
                         </span>
                       </td>
                       <td className="px-4 py-3">
                         {incident.confidence != null ? (
                           <div className="flex items-center gap-2">
-                            <div className="w-16 h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: "#f1f5f9" }}>
+                            <div
+                              className="w-16 h-1.5 rounded-full overflow-hidden"
+                              style={{ backgroundColor: "rgba(255,255,255,0.08)" }}
+                            >
                               <div
                                 className="h-full rounded-full"
                                 style={{
                                   width: `${Math.round(incident.confidence * 100)}%`,
-                                  backgroundColor: BADGE_STYLES[incident.type]?.text ?? COLORS.signalBlue,
+                                  backgroundColor: BADGE_STYLES[incident.type]?.text,
                                 }}
                               />
                             </div>
-                            <span className="text-xs font-semibold" style={{ color: COLORS.midnight }}>
+                            <span className="text-xs font-semibold" style={{ color: COLORS.text }}>
                               {Math.round(incident.confidence * 100)}%
                             </span>
                           </div>
                         ) : (
-                          <span className="text-xs" style={{ color: COLORS.slate }}>—</span>
+                          <span className="text-xs" style={{ color: COLORS.textMuted }}>
+                            —
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-3">
                         <span
                           className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-lg"
                           style={{
-                            backgroundColor: incident.reviewed ? "#f0fdf4" : "#fef3c7",
-                            color: incident.reviewed ? COLORS.safeGreen : "#d97706",
+                            backgroundColor: incident.reviewed
+                              ? "rgba(34,197,94,0.15)"
+                              : "rgba(245,158,11,0.15)",
+                            color: incident.reviewed ? COLORS.safeGreen : COLORS.cautionAmber,
                           }}
                         >
                           {incident.reviewed ? (
@@ -307,60 +312,75 @@ export default function IncidentsPage() {
         )}
       </div>
 
-      {/* Detail modal */}
       <Dialog open={!!selected} onOpenChange={() => setSelected(null)}>
-        <DialogContent className="max-w-lg rounded-2xl overflow-hidden p-0">
+        <DialogContent
+          className="max-w-lg rounded-2xl overflow-hidden p-0 border"
+          style={{ backgroundColor: COLORS.panel, borderColor: COLORS.border }}
+        >
           {selected && (
             <>
-              {/* Dark modal header */}
-              <div
-                className="px-6 py-5"
-                style={{ background: `linear-gradient(135deg, ${COLORS.midnight}, #1e3a5f)` }}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <DialogHeader>
-                      <DialogTitle className="font-bold text-white text-base">
-                        {formatAnomalyType(selected.type)}
-                      </DialogTitle>
-                    </DialogHeader>
-                    <div className="flex flex-wrap items-center gap-2 mt-2">
-                      <IncidentTypeBadge type={selected.type} />
-                      <span className="text-xs" style={{ color: "rgba(255,255,255,0.5)" }}>
-                        {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
-                      </span>
-                    </div>
-                  </div>
+              <div className="px-6 py-5" style={{ backgroundColor: COLORS.panelElevated }}>
+                <DialogHeader>
+                  <DialogTitle className="font-bold text-base" style={{ color: COLORS.text }}>
+                    {formatAnomalyType(selected.type)}
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <IncidentTypeBadge type={selected.type} />
+                  <span className="text-xs" style={{ color: COLORS.textMuted }}>
+                    {selected.created_at ? new Date(selected.created_at).toLocaleString() : "—"}
+                  </span>
                 </div>
               </div>
 
-              {/* Modal body */}
               <div className="px-6 py-5 space-y-4">
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-xl p-3" style={{ backgroundColor: COLORS.surface }}>
-                    <p className="text-xs font-semibold mb-0.5" style={{ color: COLORS.slate }}>Camera</p>
-                    <p className="text-sm font-bold" style={{ color: COLORS.midnight }}>{selected.camera_id}</p>
+                  <div
+                    className="rounded-xl p-3"
+                    style={{ backgroundColor: COLORS.panelElevated }}
+                  >
+                    <p className="text-xs font-semibold mb-0.5" style={{ color: COLORS.textMuted }}>
+                      Camera
+                    </p>
+                    <p className="text-sm font-bold" style={{ color: COLORS.text }}>
+                      {selected.camera_id}
+                    </p>
                   </div>
-                  <div className="rounded-xl p-3" style={{ backgroundColor: COLORS.surface }}>
-                    <p className="text-xs font-semibold mb-0.5" style={{ color: COLORS.slate }}>Location</p>
-                    <p className="text-sm font-bold" style={{ color: COLORS.midnight }}>{cameraLocation(selected.camera_id)}</p>
+                  <div
+                    className="rounded-xl p-3"
+                    style={{ backgroundColor: COLORS.panelElevated }}
+                  >
+                    <p className="text-xs font-semibold mb-0.5" style={{ color: COLORS.textMuted }}>
+                      Location
+                    </p>
+                    <p className="text-sm font-bold" style={{ color: COLORS.text }}>
+                      {cameraLocation(selected.camera_id)}
+                    </p>
                   </div>
                 </div>
 
                 {selected.confidence != null && (
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
-                      <p className="text-xs font-semibold" style={{ color: COLORS.slate }}>Confidence</p>
-                      <p className="text-sm font-bold" style={{ color: BADGE_STYLES[selected.type]?.text }}>
+                      <p className="text-xs font-semibold" style={{ color: COLORS.textMuted }}>
+                        Confidence
+                      </p>
+                      <p
+                        className="text-sm font-bold"
+                        style={{ color: BADGE_STYLES[selected.type]?.text }}
+                      >
                         {Math.round(selected.confidence * 100)}%
                       </p>
                     </div>
-                    <div className="h-2 rounded-full overflow-hidden" style={{ backgroundColor: "#f1f5f9" }}>
+                    <div
+                      className="h-2 rounded-full overflow-hidden"
+                      style={{ backgroundColor: "rgba(255,255,255,0.08)" }}
+                    >
                       <div
-                        className="h-full rounded-full transition-all duration-700"
+                        className="h-full rounded-full"
                         style={{
                           width: `${Math.round(selected.confidence * 100)}%`,
-                          backgroundColor: BADGE_STYLES[selected.type]?.text ?? COLORS.signalBlue,
+                          backgroundColor: BADGE_STYLES[selected.type]?.text,
                         }}
                       />
                     </div>
@@ -369,7 +389,9 @@ export default function IncidentsPage() {
 
                 {selected.clip_url && (
                   <div>
-                    <p className="text-xs font-semibold mb-2" style={{ color: COLORS.slate }}>Incident Clip</p>
+                    <p className="text-xs font-semibold mb-2" style={{ color: COLORS.textMuted }}>
+                      Incident Clip
+                    </p>
                     <video
                       src={selected.clip_url}
                       controls
@@ -391,10 +413,7 @@ export default function IncidentsPage() {
                 {!selected.reviewed && (
                   <Button
                     className="w-full h-10 font-semibold text-white rounded-xl"
-                    style={{
-                      background: "linear-gradient(135deg, #16a34a, #15803d)",
-                      boxShadow: "0 4px 14px rgba(22,163,74,0.35)",
-                    }}
+                    style={{ backgroundColor: COLORS.safeGreen }}
                     onClick={() => markReviewed(selected)}
                   >
                     <CheckCircle2 className="h-4 w-4 mr-2" /> Mark as Reviewed
@@ -408,4 +427,3 @@ export default function IncidentsPage() {
     </div>
   );
 }
-

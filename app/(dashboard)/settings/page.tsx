@@ -1,16 +1,35 @@
 "use client";
 
-import { useSession } from "@/components/SessionProvider";
+import { useSession, exitDemoMode } from "@/components/SessionProvider";
+import { PageHeader } from "@/components/dashboard/PageHeader";
+import { Panel } from "@/components/dashboard/StatusBadge";
 import { COLORS } from "@/lib/constants";
 import { Building2, Shield, Crown, User, LogOut } from "lucide-react";
 import { createClient } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 
-const planConfig: Record<string, { color: string; bg: string; icon: React.ElementType; label: string }> = {
-  starter: { color: COLORS.slate, bg: "#f1f5f9", icon: User, label: "Starter" },
-  growth: { color: COLORS.signalBlue, bg: COLORS.blueTint, icon: Building2, label: "Growth" },
-  enterprise: { color: "#7c3aed", bg: "#f5f3ff", icon: Crown, label: "Enterprise" },
+const planConfig: Record<
+  string,
+  { color: string; bg: string; icon: React.ElementType; label: string }
+> = {
+  starter: {
+    color: COLORS.textMuted,
+    bg: "rgba(148,163,184,0.15)",
+    icon: User,
+    label: "Starter",
+  },
+  growth: {
+    color: COLORS.signalBlue,
+    bg: "rgba(59,130,246,0.15)",
+    icon: Building2,
+    label: "Growth",
+  },
+  enterprise: {
+    color: "#A78BFA",
+    bg: "rgba(167,139,250,0.15)",
+    icon: Crown,
+    label: "Enterprise",
+  },
 };
 
 export default function SettingsPage() {
@@ -23,60 +42,62 @@ export default function SettingsPage() {
   const PlanIcon = planCfg.icon;
 
   const handleSignOut = async () => {
+    exitDemoMode();
     await supabase.auth.signOut();
     router.push("/login");
   };
 
   return (
-    <div className="max-w-xl space-y-6" style={{ fontFamily: "Plus Jakarta Sans, system-ui, sans-serif" }}>
-      {/* Header */}
-      <div>
-        <h1 className="text-xl font-extrabold" style={{ color: COLORS.midnight }}>Settings</h1>
-        <p className="text-sm mt-0.5" style={{ color: COLORS.slate }}>Manage your organisation details</p>
-      </div>
+    <div className="max-w-xl space-y-6">
+      <PageHeader title="Settings" description="Manage your organisation details" />
 
-      {/* Organisation card */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="bg-white rounded-2xl overflow-hidden"
-        style={{ border: "1px solid rgba(0,0,0,0.05)", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}
-      >
-        {/* Card header */}
+      <Panel>
         <div
           className="px-5 py-4 border-b flex items-center gap-2"
-          style={{ borderColor: "rgba(0,0,0,0.05)" }}
+          style={{ borderColor: COLORS.border }}
         >
           <Building2 className="h-4 w-4" style={{ color: COLORS.signalBlue }} />
-          <p className="text-sm font-bold" style={{ color: COLORS.midnight }}>Organisation</p>
+          <p className="text-sm font-bold" style={{ color: COLORS.text }}>
+            Organisation
+          </p>
         </div>
 
-        <div className="p-5 space-y-4">
-          {/* Name */}
-          <div className="flex items-center justify-between py-3 border-b" style={{ borderColor: "rgba(0,0,0,0.05)" }}>
-            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.slate }}>Name</p>
-            <p className="text-sm font-bold" style={{ color: COLORS.midnight }}>{org?.name ?? "—"}</p>
+        <div className="p-5 space-y-1">
+          <div
+            className="flex items-center justify-between py-3 border-b"
+            style={{ borderColor: COLORS.border }}
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.textMuted }}>
+              Name
+            </p>
+            <p className="text-sm font-bold" style={{ color: COLORS.text }}>
+              {org?.name ?? "—"}
+            </p>
           </div>
 
-          {/* Type */}
-          <div className="flex items-center justify-between py-3 border-b" style={{ borderColor: "rgba(0,0,0,0.05)" }}>
-            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.slate }}>Type</p>
+          <div
+            className="flex items-center justify-between py-3 border-b"
+            style={{ borderColor: COLORS.border }}
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.textMuted }}>
+              Type
+            </p>
             <div className="flex items-center gap-1.5">
               {org?.org_type === "government" ? (
                 <Shield className="h-3.5 w-3.5" style={{ color: COLORS.signalBlue }} />
               ) : (
                 <Building2 className="h-3.5 w-3.5" style={{ color: COLORS.signalBlue }} />
               )}
-              <p className="text-sm font-semibold capitalize" style={{ color: COLORS.midnight }}>
+              <p className="text-sm font-semibold capitalize" style={{ color: COLORS.text }}>
                 {org?.org_type ?? "—"}
               </p>
             </div>
           </div>
 
-          {/* Plan */}
           <div className="flex items-center justify-between py-3">
-            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.slate }}>Plan</p>
+            <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: COLORS.textMuted }}>
+              Plan
+            </p>
             <span
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold"
               style={{ backgroundColor: planCfg.bg, color: planCfg.color }}
@@ -86,40 +107,41 @@ export default function SettingsPage() {
             </span>
           </div>
         </div>
-      </motion.div>
+      </Panel>
 
-      {/* Danger zone */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1 }}
-        className="bg-white rounded-2xl overflow-hidden"
-        style={{ border: "1px solid #fecaca", boxShadow: "0 2px 12px rgba(220,38,38,0.06)" }}
-      >
+      <Panel className="overflow-hidden" >
         <div
           className="px-5 py-4 border-b flex items-center gap-2"
-          style={{ borderColor: "#fecaca", backgroundColor: "#fff5f5" }}
+          style={{
+            borderColor: "rgba(239,68,68,0.3)",
+            backgroundColor: "rgba(239,68,68,0.08)",
+          }}
         >
           <LogOut className="h-4 w-4" style={{ color: COLORS.alertRed }} />
-          <p className="text-sm font-bold" style={{ color: COLORS.alertRed }}>Account</p>
+          <p className="text-sm font-bold" style={{ color: COLORS.alertRed }}>
+            Account
+          </p>
         </div>
         <div className="p-5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-sm font-semibold" style={{ color: COLORS.midnight }}>Sign out</p>
-              <p className="text-xs mt-0.5" style={{ color: COLORS.slate }}>You will be redirected to the login page</p>
+              <p className="text-sm font-semibold" style={{ color: COLORS.text }}>
+                Sign out
+              </p>
+              <p className="text-xs mt-0.5" style={{ color: COLORS.textMuted }}>
+                You will be redirected to the login page
+              </p>
             </div>
             <button
               onClick={handleSignOut}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold transition-all hover:bg-red-100"
-              style={{ backgroundColor: "#fee2e2", color: COLORS.alertRed }}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold shrink-0"
+              style={{ backgroundColor: "rgba(239,68,68,0.15)", color: COLORS.alertRed }}
             >
               <LogOut className="h-3.5 w-3.5" /> Sign out
             </button>
           </div>
         </div>
-      </motion.div>
+      </Panel>
     </div>
   );
 }
-
