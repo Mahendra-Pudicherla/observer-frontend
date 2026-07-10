@@ -16,7 +16,7 @@ import {
   type Incident,
 } from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
-import { Check, UserPlus, Search } from "lucide-react";
+import { Check, UserPlus, Search, Video } from "lucide-react";
 
 type AlertCard = {
   id: string;
@@ -27,6 +27,7 @@ type AlertCard = {
   status: "open" | "assigned" | "resolved";
   assignee: string;
   incidentId?: string;
+  clipUrl?: string | null;
 };
 
 function timeAgo(iso?: string | null) {
@@ -64,6 +65,7 @@ export default function AlertsPage() {
         : "open",
     assignee: assignees[a.incident_id ?? `live-${a.camera_id}-${i}`] ?? "Unassigned",
     incidentId: a.incident_id ?? undefined,
+    clipUrl: a.clip_url,
   }));
 
   const fromIncidents: AlertCard[] = incidents.map((inc: Incident) => {
@@ -78,6 +80,7 @@ export default function AlertsPage() {
       status: (isResolved ? "resolved" : assignees[id] ? "assigned" : "open") as AlertCard["status"],
       assignee: assignees[id] ?? "Unassigned",
       incidentId: id,
+      clipUrl: inc.clip_url,
     };
   });
 
@@ -185,6 +188,21 @@ export default function AlertsPage() {
               </span>
             </div>
             <div className="flex gap-2 mt-1">
+              {card.clipUrl && (
+                <a
+                  href={card.clipUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-xl text-xs font-semibold"
+                  style={{
+                    border: `1px solid ${COLORS.border}`,
+                    color: COLORS.signalBlue,
+                    backgroundColor: COLORS.panelElevated,
+                  }}
+                >
+                  <Video className="h-3.5 w-3.5" /> Clip
+                </a>
+              )}
               <button
                 type="button"
                 onClick={() => assign(card.id)}

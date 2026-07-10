@@ -165,6 +165,7 @@ export interface AnalysisSnapshot {
   grid_rows: number;
   grid: number[][];
   total_people: number;
+  camera_counts?: Record<string, number>;
   movement: MovementSnapshot;
   peak_density: number;
   cameras_reporting: number;

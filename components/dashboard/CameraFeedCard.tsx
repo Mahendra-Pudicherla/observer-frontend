@@ -13,6 +13,7 @@ export function CameraFeedCard({
   index,
   onLiveChange,
   statusLabel,
+  peopleCount,
 }: {
   camera: Camera;
   orgId: string;
@@ -20,6 +21,7 @@ export function CameraFeedCard({
   index: number;
   onLiveChange?: (cameraId: string, isLive: boolean) => void;
   statusLabel?: string;
+  peopleCount?: number;
 }) {
   const { frame, live } = useCameraFeed(orgId, camera.id);
 
@@ -62,11 +64,19 @@ export function CameraFeedCard({
           />
         )}
 
-        <div className="absolute top-2.5 left-2.5 z-20">
+        <div className="absolute top-2.5 left-2.5 z-20 flex flex-col gap-1.5">
           <StatusBadge
             label={live ? "ONLINE" : "OFFLINE"}
             tone={live ? "online" : "offline"}
           />
+          {live && peopleCount !== undefined && (
+            <span
+              className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+              style={{ backgroundColor: "rgba(0,0,0,0.65)", color: "#fff" }}
+            >
+              {peopleCount} {peopleCount === 1 ? "person" : "people"}
+            </span>
+          )}
         </div>
 
         {isAlerting && (

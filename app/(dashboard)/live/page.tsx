@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSession } from "@/components/SessionProvider";
 import { useAlertSocket } from "@/hooks/useAlertSocket";
+import { useAnalysisSocket } from "@/hooks/useAnalysisSocket";
 import { useOrgCameras } from "@/hooks/useOrgData";
 import { CameraFeedCard } from "@/components/dashboard/CameraFeedCard";
 import { PageHeader } from "@/components/dashboard/PageHeader";
@@ -14,6 +15,7 @@ export default function LiveMonitoringPage() {
   const { org } = useSession();
   const { cameras } = useOrgCameras(true);
   const { activeAlert } = useAlertSocket(org?.id ?? null);
+  const { snapshot } = useAnalysisSocket(org?.id ?? null);
   const [liveCameras, setLiveCameras] = useState<Set<string>>(new Set());
   const [alertingCameras, setAlertingCameras] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("all");
@@ -95,6 +97,7 @@ export default function LiveMonitoringPage() {
               index={i}
               onLiveChange={handleLiveChange}
               statusLabel={statusFor(camera.id)}
+              peopleCount={snapshot.camera_counts?.[camera.id]}
             />
           ))
         )}

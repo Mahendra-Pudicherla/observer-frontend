@@ -9,6 +9,31 @@ interface UseAlertSocketResult {
   clearAlert: () => void;
 }
 
+function isClipUpdate(prev: AlertPayload, next: AlertPayload): boolean {
+  return (
+    prev.camera_id === next.camera_id &&
+    prev.type === next.type &&
+    !prev.clip_url &&
+    Boolean(next.clip_url)
+  );
+}
+
+function mergeAlertList(prev: AlertPayload[], incoming: AlertPayload): AlertPayload[] {
+  const idx = prev.findIndex(
+    (a) =>
+      a.camera_id === incoming.camera_id &&
+      a.type === incoming.type &&
+      !a.incident_id &&
+      incoming.incident_id
+  );
+  if (idx >= 0) {
+    const updated = [...prev];
+    updated[idx] = { ...updated[idx], ...incoming };
+    return updated;
+  }
+  return [incoming, ...prev].slice(0, 20);
+}
+
 export function useAlertSocket(orgId: string | null): UseAlertSocketResult {
   const [activeAlert, setActiveAlert] = useState<AlertPayload | null>(null);
   const [allAlerts, setAllAlerts] = useState<AlertPayload[]>([]);
@@ -33,8 +58,14 @@ export function useAlertSocket(orgId: string | null): UseAlertSocketResult {
           const parsed = JSON.parse(event.data as string) as Record<string, unknown>;
           if (parsed.type === "ping") return;
           const alert = parsed as unknown as AlertPayload;
-          setActiveAlert(alert);
-          setAllAlerts((prev) => [alert, ...prev].slice(0, 20));
+
+          setActiveAlert((prev) => {
+            if (prev && isClipUpdate(prev, alert)) {
+              return { ...prev, ...alert };
+            }
+            return alert;
+          });
+          setAllAlerts((prev) => mergeAlertList(prev, alert));
         } catch {
           // ignore malformed messages
         }
