@@ -130,8 +130,8 @@ export default function RecordsPage() {
       )}
 
       {loading ? (
-        <Panel className="p-10 text-center text-sm" style={{ color: COLORS.textMuted }}>
-          Loading recordings…
+        <Panel className="p-10 text-center text-sm">
+          <p style={{ color: COLORS.textMuted }}>Loading recordings…</p>
         </Panel>
       ) : clips.length === 0 ? (
         <Panel className="p-12 text-center">
