@@ -31,6 +31,8 @@ export default function CameraNodePage({
   const [camError, setCamError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [frameCount, setFrameCount] = useState(0);
+  const [videoSource, setVideoSource] = useState<"webcam" | "file">("webcam");
+  const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
 
   // Load camera metadata
   useEffect(() => {
@@ -105,6 +107,18 @@ export default function CameraNodePage({
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+      videoRef.current.src = "";
+    }
+
+    if (videoSource === "file" && videoFileUrl) {
+      if (videoRef.current) {
+        videoRef.current.src = videoFileUrl;
+        videoRef.current.loop = true;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play().catch((playErr) => console.warn("Play failed:", playErr));
+        };
+      }
+      return;
     }
 
     // Give hardware time to release (important on Android)
@@ -155,7 +169,7 @@ export default function CameraNodePage({
         // optional
       }
     }
-  }, [facingMode]);
+  }, [facingMode, videoSource, videoFileUrl]);
 
   // Frame sending interval — runs independently of WebSocket state
   useEffect(() => {
@@ -207,6 +221,19 @@ export default function CameraNodePage({
   // Toggle between front and back camera
   const toggleCamera = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setVideoFileUrl(url);
+      setVideoSource("file");
+    }
+  };
+
+  const switchToWebcam = () => {
+    setVideoSource("webcam");
   };
 
   const displayError = camError || wsError;
@@ -262,17 +289,46 @@ export default function CameraNodePage({
           </div>
 
           {/* Toggle camera button */}
-          <button
-            onClick={toggleCamera}
-            className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
-            style={{
-              backgroundColor: "rgba(255,255,255,0.12)",
-              color: "white",
-              border: "1px solid rgba(255,255,255,0.2)",
-            }}
-          >
-            🔄 Switch to {facingMode === "environment" ? "Front" : "Back"} Camera
-          </button>
+          {videoSource === "webcam" ? (
+            <button
+              onClick={toggleCamera}
+              className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
+              style={{
+                backgroundColor: "rgba(255,255,255,0.12)",
+                color: "white",
+                border: "1px solid rgba(255,255,255,0.2)",
+              }}
+            >
+              🔄 Switch to {facingMode === "environment" ? "Front" : "Back"} Camera
+            </button>
+          ) : (
+            <button
+              onClick={switchToWebcam}
+              className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
+              style={{
+                backgroundColor: "rgba(255,255,255,0.12)",
+                color: "white",
+                border: "1px solid rgba(255,255,255,0.2)",
+              }}
+            >
+              📹 Back to Webcam
+            </button>
+          )}
+
+          {/* Upload Video File Button */}
+          <div className="pt-2">
+            <label
+              className="cursor-pointer px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 inline-block active:scale-95"
+              style={{
+                backgroundColor: COLORS.signalBlue,
+                color: "white",
+                boxShadow: "0 4px 14px rgba(37,99,235,0.4)",
+              }}
+            >
+              📁 Test with Video File
+              <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+            </label>
+          </div>
 
           {/* Frame counter */}
           {status === "connected" && (
