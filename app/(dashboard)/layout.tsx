@@ -16,6 +16,7 @@ import {
   Map,
   FileBarChart2,
   Users,
+  ScanFace,
   PanelLeftClose,
   PanelLeft,
 } from "lucide-react";
@@ -37,6 +38,7 @@ const navItems = [
   { href: "/alerts", label: "Alerts", icon: Siren },
   { href: "/incidents", label: "Incidents", icon: FileText },
   { href: "/cameras", label: "Cameras", icon: Camera },
+  { href: "/face-watchlist", label: "Face Watchlist", icon: ScanFace },
   { href: "/maps", label: "Maps", icon: Map },
   { href: "/reports", label: "Reports", icon: FileBarChart2 },
   { href: "/users", label: "Users", icon: Users },

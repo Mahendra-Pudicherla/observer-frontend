@@ -93,10 +93,13 @@ export interface Database {
           org_id: string;
           camera_id: string;
           type:
+            | "VIOLENCE_DETECTED"
+            | "WEAPON_DETECTED"
+            | "FACE_MATCHED"
+            | "CROWD_SURGE"
             | "FIGHT_DETECTED"
             | "LOITERING_DETECTED"
-            | "PERSON_FALLEN"
-            | "CROWD_SURGE";
+            | "PERSON_FALLEN";
           confidence: number | null;
           clip_url: string | null;
           started_at: string | null;
@@ -109,10 +112,13 @@ export interface Database {
           org_id: string;
           camera_id: string;
           type:
+            | "VIOLENCE_DETECTED"
+            | "WEAPON_DETECTED"
+            | "FACE_MATCHED"
+            | "CROWD_SURGE"
             | "FIGHT_DETECTED"
             | "LOITERING_DETECTED"
-            | "PERSON_FALLEN"
-            | "CROWD_SURGE";
+            | "PERSON_FALLEN";
           confidence?: number | null;
           clip_url?: string | null;
           started_at?: string | null;
@@ -125,15 +131,45 @@ export interface Database {
           org_id?: string;
           camera_id?: string;
           type?:
+            | "VIOLENCE_DETECTED"
+            | "WEAPON_DETECTED"
+            | "FACE_MATCHED"
+            | "CROWD_SURGE"
             | "FIGHT_DETECTED"
             | "LOITERING_DETECTED"
-            | "PERSON_FALLEN"
-            | "CROWD_SURGE";
+            | "PERSON_FALLEN";
           confidence?: number | null;
           clip_url?: string | null;
           started_at?: string | null;
           ended_at?: string | null;
           reviewed?: boolean | null;
+          created_at?: string | null;
+        };
+        Relationships: [];
+      };
+      watchlist_faces: {
+        Row: {
+          id: string;
+          org_id: string;
+          name: string;
+          image_url: string | null;
+          embedding: Json;
+          created_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          org_id: string;
+          name: string;
+          image_url?: string | null;
+          embedding: Json;
+          created_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          org_id?: string;
+          name?: string;
+          image_url?: string | null;
+          embedding?: Json;
           created_at?: string | null;
         };
         Relationships: [];

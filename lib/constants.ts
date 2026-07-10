@@ -80,10 +80,13 @@ export const PRICING_TIERS = {
 } as const;
 
 export type AnomalyType =
+  | "VIOLENCE_DETECTED"
+  | "WEAPON_DETECTED"
+  | "FACE_MATCHED"
+  | "CROWD_SURGE"
   | "FIGHT_DETECTED"
   | "LOITERING_DETECTED"
-  | "PERSON_FALLEN"
-  | "CROWD_SURGE";
+  | "PERSON_FALLEN";
 
 export interface AlertPayload {
   type: AnomalyType;
@@ -135,8 +138,11 @@ export function anomalySeverity(
   type: AnomalyType
 ): "critical" | "high" | "medium" | "low" {
   switch (type) {
+    case "VIOLENCE_DETECTED":
     case "FIGHT_DETECTED":
+    case "WEAPON_DETECTED":
       return "critical";
+    case "FACE_MATCHED":
     case "CROWD_SURGE":
       return "high";
     case "PERSON_FALLEN":

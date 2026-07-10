@@ -75,7 +75,12 @@ export default function AiAnalysisPage() {
   const { snapshot, connected } = useAnalysisSocket(org?.id ?? null);
 
   const recentCritical = incidents.filter(
-    (i) => i.type === "FIGHT_DETECTED" || i.type === "CROWD_SURGE"
+    (i) =>
+      i.type === "VIOLENCE_DETECTED" ||
+      i.type === "FIGHT_DETECTED" ||
+      i.type === "WEAPON_DETECTED" ||
+      i.type === "FACE_MATCHED" ||
+      i.type === "CROWD_SURGE"
   );
   const openCount = incidents.filter((i) => !i.reviewed).length;
   const risk = Math.min(

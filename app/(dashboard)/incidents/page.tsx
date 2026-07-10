@@ -31,21 +31,24 @@ import {
 } from "lucide-react";
 
 const ANOMALY_TYPES: AnomalyType[] = [
-  "FIGHT_DETECTED",
-  "LOITERING_DETECTED",
-  "PERSON_FALLEN",
+  "VIOLENCE_DETECTED",
+  "WEAPON_DETECTED",
+  "FACE_MATCHED",
   "CROWD_SURGE",
 ];
 
-const BADGE_STYLES: Record<AnomalyType, { bg: string; text: string; border: string }> = {
+const BADGE_STYLES: Record<string, { bg: string; text: string; border: string }> = {
+  VIOLENCE_DETECTED: { bg: "rgba(239,68,68,0.15)", text: "#F87171", border: "rgba(239,68,68,0.3)" },
+  WEAPON_DETECTED: { bg: "rgba(220,38,38,0.2)", text: "#FCA5A5", border: "rgba(220,38,38,0.35)" },
+  FACE_MATCHED: { bg: "rgba(168,85,247,0.15)", text: "#C084FC", border: "rgba(168,85,247,0.3)" },
+  CROWD_SURGE: { bg: "rgba(249,115,22,0.15)", text: "#FB923C", border: "rgba(249,115,22,0.3)" },
   FIGHT_DETECTED: { bg: "rgba(239,68,68,0.15)", text: "#F87171", border: "rgba(239,68,68,0.3)" },
   LOITERING_DETECTED: { bg: "rgba(245,158,11,0.15)", text: "#FBBF24", border: "rgba(245,158,11,0.3)" },
   PERSON_FALLEN: { bg: "rgba(59,130,246,0.15)", text: "#60A5FA", border: "rgba(59,130,246,0.3)" },
-  CROWD_SURGE: { bg: "rgba(249,115,22,0.15)", text: "#FB923C", border: "rgba(249,115,22,0.3)" },
 };
 
 function IncidentTypeBadge({ type }: { type: AnomalyType }) {
-  const s = BADGE_STYLES[type];
+  const s = BADGE_STYLES[type] ?? BADGE_STYLES.VIOLENCE_DETECTED;
   return (
     <span
       className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border"
