@@ -31,7 +31,7 @@ function incidentToReport(inc: Incident): ReportRow {
     title: `${formatAnomalyType(inc.type)} · ${inc.camera_id}`,
     type: "TXT",
     date,
-    size: inc.clip_url ? "2.4 MB" : "18 KB",
+    size: inc.clip_url ? "With clip" : "No clip",
     status: "ready",
     incidentId: inc.id,
     source: "incident",
