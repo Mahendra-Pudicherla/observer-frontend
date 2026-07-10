@@ -100,6 +100,21 @@ export default function SignupPage() {
       return;
     }
 
+    // The backend auto-confirmed the email — now sign in so
+    // SessionProvider has a valid session before we navigate.
+    if (!sessionUser && email && password) {
+      const { error: signInErr } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (signInErr) {
+        // Org was created but sign-in failed — send them to login
+        // page where they can sign in manually.
+        router.push("/login");
+        return;
+      }
+    }
+
     router.push("/dashboard");
     router.refresh();
   };
