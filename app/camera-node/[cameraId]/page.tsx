@@ -2,15 +2,20 @@
 
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "@/components/Logo";
-import { BACKEND_WS_URL, COLORS, type Camera } from "@/lib/constants";
+import {
+  BACKEND_API_URL,
+  BACKEND_WS_URL,
+  COLORS,
+  type Camera,
+} from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
+type Transport = "http" | "ws" | "none";
 
 const MAX_SEND_WIDTH = 480;
 const JPEG_QUALITY = 0.4;
 const FRAME_INTERVAL_MS = 500;
-const CLIENT_PING_MS = 10000;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
@@ -18,40 +23,78 @@ function buildWsUrl(orgId: string, cameraId: string): string {
   return `${wsBase}/ws/stream/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
 }
 
+function buildIngestUrl(orgId: string, cameraId: string): string {
+  const base = BACKEND_API_URL.replace(/\/$/, "");
+  return `${base}/ingest/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
+}
+
 /**
- * Camera node WebSocket manager — intentionally NOT tied to React effect
- * identity changes (those were causing mobile 1006 disconnect loops).
+ * Camera uplink prefers HTTP POST (/ingest) — works on mobile carriers and
+ * in-app browsers that drop WebSockets. WebSocket is used when it stays open.
  */
 function useCameraStream(orgId: string | undefined, cameraId: string) {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [wsError, setWsError] = useState<string | null>(null);
-  const [serverReady, setServerReady] = useState(false);
+  const [transport, setTransport] = useState<Transport>("none");
   const [frameCount, setFrameCount] = useState(0);
+  const [lastCloseCode, setLastCloseCode] = useState<number | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const retryRef = useRef(0);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stoppedRef = useRef(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const orgIdRef = useRef(orgId);
   const cameraIdRef = useRef(cameraId);
-  const reconnectFnRef = useRef<(() => void) | null>(null);
+  const transportRef = useRef<Transport>("none");
+  const inflightRef = useRef(false);
+  const failStreakRef = useRef(0);
 
   orgIdRef.current = orgId;
   cameraIdRef.current = cameraId;
 
   useEffect(() => {
-    stoppedRef.current = false;
+    let stopped = false;
+    transportRef.current = "none";
+    setTransport("none");
+    setStatus("connecting");
+    setWsError(null);
+    failStreakRef.current = 0;
 
-    const clearRetry = () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
+    const oid = orgId;
+    if (!oid) {
+      setWsError("Missing orgId in URL");
+      setStatus("disconnected");
+      return;
+    }
+
+    const ingestUrl = buildIngestUrl(oid, cameraId);
+    const wsUrl = buildWsUrl(oid, cameraId);
+
+    // Probe HTTP API first — if this fails, nothing will work
+    void (async () => {
+      try {
+        const healthBase = BACKEND_API_URL.replace(/\/$/, "");
+        const res = await fetch(`${healthBase}/health`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!stopped) {
+          setStatus("connecting");
+          setWsError(null);
+        }
+      } catch (err) {
+        if (stopped) return;
+        setStatus("disconnected");
+        setWsError(
+          `Cannot reach backend API (${BACKEND_API_URL}). Check NEXT_PUBLIC_BACKEND_API_URL. ${
+            err instanceof Error ? err.message : ""
+          }`
+        );
       }
-    };
+    })();
 
-    const closeSocket = () => {
+    // Optional WebSocket — nice when it works, not required
+    let wsRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let wsAttempts = 0;
+
+    const closeWs = () => {
       const ws = wsRef.current;
       wsRef.current = null;
       if (!ws) return;
@@ -68,68 +111,35 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
       }
     };
 
-    const scheduleReconnect = () => {
-      if (stoppedRef.current) return;
-      clearRetry();
-      const attempt = retryRef.current + 1;
-      retryRef.current = attempt;
-      const delay = Math.min(2000 * Math.min(attempt, 8), 20000);
-      setStatus("disconnected");
-      setServerReady(false);
-      setWsError(`Connection lost. Retrying… (attempt ${attempt})`);
-      retryTimerRef.current = setTimeout(() => {
-        if (!stoppedRef.current) openSocket();
-      }, delay);
-    };
-
-    const openSocket = () => {
-      if (stoppedRef.current) return;
-      const oid = orgIdRef.current;
-      const cid = cameraIdRef.current;
-      if (!oid) {
-        setWsError("Missing orgId in URL");
-        setStatus("disconnected");
-        return;
-      }
-
-      const existing = wsRef.current;
-      if (
-        existing &&
-        (existing.readyState === WebSocket.OPEN ||
-          existing.readyState === WebSocket.CONNECTING)
-      ) {
-        return;
-      }
-
-      clearRetry();
-      closeSocket();
-      setStatus("connecting");
-
-      const wsUrl = buildWsUrl(oid, cid);
+    const openWs = () => {
+      if (stopped) return;
+      closeWs();
+      wsAttempts += 1;
       let ws: WebSocket;
       try {
         ws = new WebSocket(wsUrl);
       } catch {
-        setStatus("disconnected");
-        setWsError(`Invalid WebSocket URL: ${wsUrl}`);
-        scheduleReconnect();
         return;
       }
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (stoppedRef.current || wsRef.current !== ws) return;
+        if (stopped || wsRef.current !== ws) return;
+        // Prefer WS when open
+        transportRef.current = "ws";
+        setTransport("ws");
         setStatus("connected");
         setWsError(null);
-        retryRef.current = 0;
+        failStreakRef.current = 0;
       };
 
       ws.onmessage = (event) => {
-        if (stoppedRef.current || wsRef.current !== ws) return;
+        if (stopped || wsRef.current !== ws) return;
         try {
           const data = JSON.parse(String(event.data)) as { type?: string };
           if (data.type === "ready" || data.type === "ping") {
-            setServerReady(true);
+            transportRef.current = "ws";
+            setTransport("ws");
             setStatus("connected");
             setWsError(null);
           }
@@ -138,41 +148,65 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
         }
       };
 
-      ws.onerror = () => {
-        if (stoppedRef.current || wsRef.current !== ws) return;
-        // onclose will reconnect
-      };
-
       ws.onclose = (ev) => {
-        if (stoppedRef.current) return;
         if (wsRef.current === ws) wsRef.current = null;
-        if (ev.code === 1000) {
-          setStatus("disconnected");
-          return;
+        setLastCloseCode(ev.code || 1006);
+        if (transportRef.current === "ws") {
+          transportRef.current = "http";
+          setTransport("http");
         }
-        setWsError(`Connection lost (code ${ev.code || 1006}). Retrying…`);
-        scheduleReconnect();
+        if (stopped) return;
+        // Keep retrying WS in background; HTTP carries frames
+        const delay = Math.min(3000 * Math.min(wsAttempts, 6), 20000);
+        wsRetryTimer = setTimeout(openWs, delay);
       };
     };
 
-    openSocket();
+    openWs();
 
-    const onVisible = () => {
-      if (document.visibilityState !== "visible" || stoppedRef.current) return;
-      const ws = wsRef.current;
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        retryRef.current = 0;
-        openSocket();
+    const sendFrameHttp = async (dataUrl: string) => {
+      if (inflightRef.current) return;
+      inflightRef.current = true;
+      try {
+        const res = await fetch(ingestUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ frame: dataUrl }),
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          throw new Error(`ingest HTTP ${res.status}`);
+        }
+        failStreakRef.current = 0;
+        if (transportRef.current !== "ws") {
+          transportRef.current = "http";
+          setTransport("http");
+        }
+        setStatus("connected");
+        setWsError(null);
+        setFrameCount((c) => c + 1);
+      } catch (err) {
+        failStreakRef.current += 1;
+        if (failStreakRef.current >= 3 && transportRef.current !== "ws") {
+          setStatus("disconnected");
+          setWsError(
+            `Frame upload failed (${failStreakRef.current}x). ${
+              err instanceof Error ? err.message : "network error"
+            }`
+          );
+          setTransport("none");
+          transportRef.current = "none";
+        }
+      } finally {
+        inflightRef.current = false;
       }
     };
-    document.addEventListener("visibilitychange", onVisible);
 
-    // Frame sender — reads latest video/canvas refs
     const frameTimer = setInterval(() => {
+      if (stopped) return;
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      const ws = wsRef.current;
-      if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!video || !canvas) return;
       if (!video.videoWidth || !video.videoHeight) return;
 
       const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
@@ -189,58 +223,69 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
       const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
       if (dataUrl.length > 200_000) return;
 
-      try {
-        ws.send(JSON.stringify({ frame: dataUrl }));
-        setFrameCount((c) => c + 1);
-      } catch {
-        // onclose retries
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ frame: dataUrl }));
+          setFrameCount((c) => c + 1);
+          transportRef.current = "ws";
+          setTransport("ws");
+          setStatus("connected");
+          setWsError(null);
+          return;
+        } catch {
+          // fall through to HTTP
+        }
       }
+
+      void sendFrameHttp(dataUrl);
     }, FRAME_INTERVAL_MS);
 
-    const pingTimer = setInterval(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || stopped) return;
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      try {
-        ws.send(JSON.stringify({ type: "ping" }));
-      } catch {
-        // ignore
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        openWs();
       }
-    }, CLIENT_PING_MS);
-
-    const reconnectNow = () => {
-      retryRef.current = 0;
-      clearRetry();
-      closeSocket();
-      openSocket();
     };
-    reconnectFnRef.current = reconnectNow;
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      stoppedRef.current = true;
-      reconnectFnRef.current = null;
+      stopped = true;
       document.removeEventListener("visibilitychange", onVisible);
       clearInterval(frameTimer);
-      clearInterval(pingTimer);
-      clearRetry();
-      closeSocket();
+      if (wsRetryTimer) clearTimeout(wsRetryTimer);
+      closeWs();
     };
-    // Only re-run when the stream target changes — NOT on every callback identity change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId, cameraId]);
 
   const reconnectNow = () => {
-    reconnectFnRef.current?.();
+    // Force a new effect cycle by toggling via location reload is heavy;
+    // instead poke HTTP health and reopen WS.
+    failStreakRef.current = 0;
+    setStatus("connecting");
+    setWsError(null);
+    const ws = wsRef.current;
+    if (ws) {
+      try {
+        ws.close(1000, "reconnect");
+      } catch {
+        // ignore
+      }
+    }
   };
 
   return {
     status,
     wsError,
-    serverReady,
+    transport,
     frameCount,
+    lastCloseCode,
     videoRef,
     canvasRef,
     reconnectNow,
     wsTarget: orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)",
+    httpTarget: orgId ? buildIngestUrl(orgId, cameraId) : "(missing orgId)",
   };
 }
 
@@ -265,12 +310,14 @@ export default function CameraNodePage({
   const {
     status,
     wsError,
-    serverReady,
+    transport,
     frameCount,
+    lastCloseCode,
     videoRef,
     canvasRef,
     reconnectNow,
     wsTarget,
+    httpTarget,
   } = useCameraStream(orgId, cameraId);
 
   useEffect(() => {
@@ -384,9 +431,9 @@ export default function CameraNodePage({
   const displayError = camError || wsError;
   const statusLabel =
     status === "connected"
-      ? serverReady
-        ? "● Streaming"
-        : "● Connected"
+      ? transport === "http"
+        ? "● Streaming (HTTP)"
+        : "● Streaming"
       : status === "connecting"
         ? "Connecting…"
         : "Disconnected";
@@ -484,7 +531,10 @@ export default function CameraNodePage({
 
           <button
             type="button"
-            onClick={reconnectNow}
+            onClick={() => {
+              reconnectNow();
+              window.location.reload();
+            }}
             className="px-4 py-2 rounded-xl text-xs font-semibold"
             style={{
               border: "1px solid rgba(255,255,255,0.2)",
@@ -497,11 +547,20 @@ export default function CameraNodePage({
 
           {status === "connected" && (
             <p className="text-xs text-white/40">
-              {frameCount} frames sent{serverReady ? " · server ready" : ""}
+              {frameCount} frames sent · via {transport.toUpperCase()}
             </p>
           )}
 
-          <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">{wsTarget}</p>
+          <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">
+            HTTP: {httpTarget}
+          </p>
+          <p className="text-[10px] text-white/20 break-all max-w-sm mx-auto px-2">
+            WS: {wsTarget}
+            {lastCloseCode != null ? ` · last close ${lastCloseCode}` : ""}
+          </p>
+          <p className="text-[10px] text-white/25 max-w-sm mx-auto px-2">
+            Tip: open this page in Chrome (not WhatsApp/Instagram browser).
+          </p>
         </div>
       </main>
     </div>
