@@ -323,6 +323,7 @@ export default function CameraNodePage({
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
   const [webcamLive, setWebcamLive] = useState(false);
   const [webcamBusy, setWebcamBusy] = useState(false);
+  const [activeCamLabel, setActiveCamLabel] = useState("");
 
   const {
     status,
@@ -383,9 +384,9 @@ export default function CameraNodePage({
   };
 
   /**
-   * Pick a camera deviceId by label / facing. Mobile labels vary:
-   * back: "camera2 0, facing back", "Back Camera", "Rear"
-   * front: "camera2 1, facing front", "Front Camera", "Face"
+   * Pick a camera deviceId by label / facing.
+   * IMPORTANT: do not match bare "face" — it matches the word "facing" and
+   * mis-classifies "camera2 0, facing back" as a front camera.
    */
   const findCameraDeviceId = async (
     facing: "environment" | "user"
@@ -396,31 +397,33 @@ export default function CameraNodePage({
       if (!cams.length) return null;
 
       const isBack = (label: string) =>
-        /back|rear|environment|world|facing back/i.test(label);
+        /facing\s*back|\bback\b|\brear\b|\benvironment\b|\bworld\b/i.test(label);
       const isFront = (label: string) =>
-        /front|user|face|facing front|selfie/i.test(label);
+        /facing\s*front|\bfront\b|\buser\b|\bselfie\b/i.test(label);
 
       if (facing === "environment") {
-        const hit = cams.find((c) => isBack(c.label));
-        if (hit) return hit.deviceId;
-        // Many Androids list back camera first when labels are empty
-        if (cams.length > 1 && cams.every((c) => !c.label)) return cams[0]!.deviceId;
-        if (cams.length > 1) {
-          const notFront = cams.find((c) => !isFront(c.label));
-          if (notFront) return notFront.deviceId;
-        }
-      } else {
-        const hit = cams.find((c) => isFront(c.label));
-        if (hit) return hit.deviceId;
-        if (cams.length > 1 && cams.every((c) => !c.label)) return cams[1]!.deviceId;
-        if (cams.length > 1) {
-          const notBack = cams.find((c) => !isBack(c.label));
-          if (notBack) return notBack.deviceId;
-        }
+        const labeled = cams.find((c) => isBack(c.label) && !isFront(c.label));
+        if (labeled) return labeled.deviceId;
+        // Android often lists back camera first when labels are empty
+        if (cams.length >= 2) return cams[0]!.deviceId;
+        return cams[0]?.deviceId ?? null;
       }
+
+      const labeled = cams.find((c) => isFront(c.label) && !isBack(c.label));
+      if (labeled) return labeled.deviceId;
+      if (cams.length >= 2) return cams[1]!.deviceId;
       return cams[0]?.deviceId ?? null;
     } catch {
       return null;
+    }
+  };
+
+  const listVideoDeviceIds = async (): Promise<MediaDeviceInfo[]> => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+    } catch {
+      return [];
     }
   };
 
@@ -431,9 +434,14 @@ export default function CameraNodePage({
     return settings.facingMode;
   };
 
+  const trackLabel = (stream: MediaStream): string => {
+    const track = stream.getVideoTracks()[0];
+    return track?.label || track?.getSettings?.().deviceId || "unknown";
+  };
+
   /**
-   * Open webcam. First open: call getUserMedia immediately (no awaits before it)
-   * or mobile Chrome blocks the camera. Switch: release previous cam, then reopen.
+   * Open a specific camera. When switching to back, never fall back to
+   * `video: true` (that silently re-opens the front camera).
    */
   const startWebcam = async (facing: "environment" | "user") => {
     if (webcamBusy) return;
@@ -466,19 +474,22 @@ export default function CameraNodePage({
     }
 
     const wasLive = !!streamRef.current;
+    // Remember current device so we can open a *different* one for back cam
+    const previousDeviceId =
+      streamRef.current?.getVideoTracks()[0]?.getSettings?.().deviceId ?? null;
+
     stopTracks();
     resetVideoElement(el);
     setWebcamLive(false);
 
-    // Only delay when switching away from an already-open camera.
-    // A delay BEFORE the first getUserMedia breaks Chrome's user-gesture rule
-    // and leaves the UI stuck on "Opening…".
+    // Delay only when releasing an already-open camera (switch path).
     if (wasLive) {
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 400));
     }
 
     let stream: MediaStream | null = null;
     let lastErr: unknown = null;
+    const triedIds = new Set<string>();
 
     const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
       Promise.race([
@@ -488,36 +499,54 @@ export default function CameraNodePage({
         ),
       ]);
 
-    try {
-      // 1) Fast path — facingMode only (keeps user gesture on first open)
+    const tryOpen = async (constraints: MediaTrackConstraints): Promise<boolean> => {
       try {
-        stream = await withTimeout(
-          navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: facing } },
-            audio: false,
-          }),
-          15000
+        const s = await withTimeout(
+          navigator.mediaDevices.getUserMedia({ video: constraints, audio: false }),
+          12000
         );
+        stream = s;
+        return true;
       } catch (err) {
         lastErr = err;
+        return false;
+      }
+    };
+
+    try {
+      // After front cam has been used, device labels are available — prefer deviceId.
+      const preferredId = wasLive ? await findCameraDeviceId(facing) : null;
+
+      if (preferredId) {
+        triedIds.add(preferredId);
+        await tryOpen({ deviceId: { exact: preferredId } });
+        if (!stream) await tryOpen({ deviceId: { ideal: preferredId } });
       }
 
+      // facingMode (first open, or deviceId failed)
       if (!stream) {
-        try {
-          stream = await withTimeout(
-            navigator.mediaDevices.getUserMedia({
-              video: { facingMode: facing },
-              audio: false,
-            }),
-            12000
-          );
-        } catch (err) {
-          lastErr = err;
+        await tryOpen({ facingMode: { ideal: facing } });
+      }
+      if (!stream) {
+        await tryOpen({ facingMode: facing });
+      }
+
+      // Back camera: try every other video device (wide / ultra / tele) except previous
+      if (!stream && facing === "environment") {
+        const cams = await listVideoDeviceIds();
+        for (const cam of cams) {
+          if (triedIds.has(cam.deviceId)) continue;
+          if (previousDeviceId && cam.deviceId === previousDeviceId) continue;
+          // Skip obvious front cameras by label
+          if (/facing\s*front|\bfront\b|\bselfie\b/i.test(cam.label)) continue;
+          triedIds.add(cam.deviceId);
+          if (await tryOpen({ deviceId: { exact: cam.deviceId } })) break;
         }
       }
 
-      // 2) Any camera (front usually) — better than hanging forever
-      if (!stream) {
+      // Front camera only: last-resort any camera. NEVER do this for back —
+      // it overrides back requests with the front lens.
+      if (!stream && facing === "user") {
         try {
           stream = await withTimeout(
             navigator.mediaDevices.getUserMedia({ video: true, audio: false }),
@@ -528,24 +557,39 @@ export default function CameraNodePage({
         }
       }
 
-      // 3) After permission exists, refine with deviceId if wrong lens
-      if (stream) {
+      // If we got a stream but asked for back and clearly got front, keep trying others
+      if (stream && facing === "environment") {
         const actual = trackFacing(stream);
-        const wantBack = facing === "environment";
-        const gotFront = actual === "user" || (!actual && facing === "environment");
-        if (wantBack && (actual === "user" || gotFront)) {
-          const deviceId = await findCameraDeviceId("environment");
-          if (deviceId) {
+        const label = trackLabel(stream).toLowerCase();
+        const looksFront =
+          actual === "user" || /facing\s*front|\bfront\b|\bselfie\b/.test(label);
+        if (looksFront) {
+          const currentId = stream.getVideoTracks()[0]?.getSettings?.().deviceId;
+          const cams = await listVideoDeviceIds();
+          let swapped = false;
+          for (const cam of cams) {
+            if (cam.deviceId === currentId) continue;
+            if (/facing\s*front|\bfront\b|\bselfie\b/i.test(cam.label)) continue;
             try {
               const alt = await navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { exact: deviceId } },
+                video: { deviceId: { exact: cam.deviceId } },
                 audio: false,
               });
               stream.getTracks().forEach((t) => t.stop());
               stream = alt;
-            } catch {
-              // keep whatever we have
+              swapped = true;
+              break;
+            } catch (err) {
+              lastErr = err;
             }
+          }
+          if (!swapped) {
+            stream.getTracks().forEach((t) => t.stop());
+            stream = null;
+            setCamError(
+              "Back camera is busy or blocked. Close Instagram/WhatsApp/Camera apps, then tap Switch to Back Camera again."
+            );
+            return;
           }
         }
       }
@@ -564,7 +608,10 @@ export default function CameraNodePage({
         const which = facing === "environment" ? "back" : "front";
         setCamError(
           `Could not open ${which} camera (${name}). ${
-            msg || "Allow camera permission and tap Start Webcam again."
+            msg ||
+            (facing === "environment"
+              ? "Close other apps using the camera, then retry."
+              : "Allow camera permission and retry.")
           }`
         );
         return;
@@ -572,6 +619,7 @@ export default function CameraNodePage({
 
       streamRef.current = stream;
       el.srcObject = stream;
+      setActiveCamLabel(trackLabel(stream));
 
       try {
         await el.play();
@@ -579,7 +627,14 @@ export default function CameraNodePage({
         // user can tap video
       }
       setWebcamLive(true);
-      setCamError(null);
+
+      const opened = trackFacing(stream);
+      const label = trackLabel(stream);
+      if (facing === "environment" && opened === "user") {
+        setCamError(`Opened front instead of back (${label}). Try Switch again.`);
+      } else {
+        setCamError(null);
+      }
     } catch (err) {
       setCamError(`Camera error: ${err instanceof Error ? err.message : String(err)}`);
       stopTracks();
@@ -708,7 +763,9 @@ export default function CameraNodePage({
               {videoSource === "file"
                 ? "Uploaded video"
                 : webcamLive
-                  ? `Webcam (${facingMode})`
+                  ? `Webcam (${facingMode === "environment" ? "back" : "front"}${
+                      activeCamLabel ? ` · ${activeCamLabel}` : ""
+                    })`
                   : "Webcam (not started)"}
             </p>
           </div>
