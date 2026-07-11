@@ -13,9 +13,10 @@ import { createClient } from "@/lib/supabase";
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type Transport = "http" | "ws" | "none";
 
-const MAX_SEND_WIDTH = 360;
-const JPEG_QUALITY = 0.35;
-const FRAME_INTERVAL_MS = 700;
+const MAX_SEND_WIDTH = 480;
+const JPEG_QUALITY = 0.55;
+const FRAME_INTERVAL_MS = 600;
+const MIN_FRAME_BYTES = 2500;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
@@ -225,6 +226,8 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
         void video.play().catch(() => undefined);
       }
 
+      // HAVE_CURRENT_DATA — avoid uploading black/empty canvases
+      if (video.readyState < 2) return;
       if (!video.videoWidth || !video.videoHeight) return;
 
       const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
@@ -241,14 +244,15 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
 
       void (async () => {
         const blob = await canvasToJpegBlob(canvas, JPEG_QUALITY);
-        if (!blob || blob.size > 120_000) return;
+        // Tiny JPEGs are almost always blank/black — don't mark "streaming" with them
+        if (!blob || blob.size < MIN_FRAME_BYTES) return;
+        if (blob.size > 180_000) return;
 
         const ws = wsRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
           try {
-            // WS still uses compact data URL when available
             const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-            if (dataUrl.length <= 200_000) {
+            if (dataUrl.length >= 3000 && dataUrl.length <= 250_000) {
               ws.send(JSON.stringify({ frame: dataUrl }));
               setFrameCount((c) => c + 1);
               transportRef.current = "ws";

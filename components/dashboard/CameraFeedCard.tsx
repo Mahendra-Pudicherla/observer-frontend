@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { useCameraFeed } from "@/hooks/useCameraFeed";
 import { COLORS, type Camera } from "@/lib/constants";
@@ -24,10 +24,18 @@ export function CameraFeedCard({
   peopleCount?: number;
 }) {
   const { frame, live } = useCameraFeed(orgId, camera.id);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     onLiveChange?.(camera.id, live);
   }, [live, camera.id, onLiveChange]);
+
+  // Update <img> directly — avoids React re-render lag on every JPEG
+  useEffect(() => {
+    if (frame && imgRef.current) {
+      imgRef.current.src = frame;
+    }
+  }, [frame]);
 
   return (
     <motion.div
@@ -45,23 +53,30 @@ export function CameraFeedCard({
         className="relative aspect-video scanlines"
         style={{ backgroundColor: COLORS.midnight }}
       >
-        {frame && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={frame}
-            alt={`Live feed from ${camera.name}`}
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        )}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          ref={imgRef}
+          alt={`Live feed from ${camera.name}`}
+          className="absolute inset-0 w-full h-full object-cover"
+          style={{ display: frame ? "block" : "none" }}
+        />
         {!frame && (
-          <div
-            className="absolute inset-0 opacity-40"
-            style={{
-              backgroundImage:
-                "linear-gradient(rgba(59,130,246,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.08) 1px, transparent 1px)",
-              backgroundSize: "24px 24px",
-            }}
-          />
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+            <div
+              className="absolute inset-0 opacity-40"
+              style={{
+                backgroundImage:
+                  "linear-gradient(rgba(59,130,246,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.08) 1px, transparent 1px)",
+                backgroundSize: "24px 24px",
+              }}
+            />
+            <p className="relative z-10 text-xs" style={{ color: COLORS.textMuted }}>
+              Waiting for stream…
+            </p>
+            <p className="relative z-10 text-[10px]" style={{ color: COLORS.textMuted }}>
+              {camera.id}
+            </p>
+          </div>
         )}
 
         <div className="absolute top-2.5 left-2.5 z-20 flex flex-col gap-1.5">
