@@ -321,6 +321,8 @@ export default function CameraNodePage({
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [videoSource, setVideoSource] = useState<"webcam" | "file">("webcam");
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
+  const [webcamLive, setWebcamLive] = useState(false);
+  const [webcamBusy, setWebcamBusy] = useState(false);
 
   const {
     status,
@@ -353,197 +355,285 @@ export default function CameraNodePage({
     })();
   }, [orgId, cameraId, supabase]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const stopTracks = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
 
-    const resetVideoElement = (el: HTMLVideoElement) => {
-      try {
-        el.pause();
-      } catch {
-        // ignore
-      }
-      el.onloadedmetadata = null;
-      el.onloadeddata = null;
-      el.onerror = null;
-      el.removeAttribute("src");
-      el.srcObject = null;
-      // Critical on mobile Chrome after blob/file playback
-      try {
-        el.load();
-      } catch {
-        // ignore
-      }
-    };
+  const resetVideoElement = (el: HTMLVideoElement) => {
+    try {
+      el.pause();
+    } catch {
+      // ignore
+    }
+    el.onloadedmetadata = null;
+    el.removeAttribute("src");
+    el.srcObject = null;
+    try {
+      el.load();
+    } catch {
+      // ignore
+    }
+    el.muted = true;
+    el.defaultMuted = true;
+    el.playsInline = true;
+    el.setAttribute("playsinline", "true");
+    el.setAttribute("webkit-playsinline", "true");
+    el.autoplay = true;
+  };
 
-    const start = async () => {
-      setCamError(null);
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
+  /**
+   * Pick a camera deviceId by label / facing. Mobile labels vary:
+   * back: "camera2 0, facing back", "Back Camera", "Rear"
+   * front: "camera2 1, facing front", "Front Camera", "Face"
+   */
+  const findCameraDeviceId = async (
+    facing: "environment" | "user"
+  ): Promise<string | null> => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+      if (!cams.length) return null;
 
-      const el = videoRef.current;
-      if (!el) {
-        setCamError("Video element not ready. Tap Reconnect.");
-        return;
-      }
+      const isBack = (label: string) =>
+        /back|rear|environment|world|facing back/i.test(label);
+      const isFront = (label: string) =>
+        /front|user|face|facing front|selfie/i.test(label);
 
-      resetVideoElement(el);
-      el.muted = true;
-      el.defaultMuted = true;
-      el.playsInline = true;
-      el.setAttribute("playsinline", "true");
-      el.setAttribute("webkit-playsinline", "true");
-      el.autoplay = true;
-
-      // ── File / uploaded video ──────────────────────────────────
-      if (videoSource === "file" && videoFileUrl) {
-        el.loop = true;
-        el.src = videoFileUrl;
-        const playFile = () => {
-          el.play().catch((err) => {
-            if (!cancelled) {
-              setCamError(`Video file play failed: ${String(err)}`);
-            }
-          });
-        };
-        el.onloadedmetadata = playFile;
-        if (el.readyState >= 1) playFile();
-        return;
-      }
-
-      // ── Webcam ────────────────────────────────────────────────
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setCamError("This browser does not support camera access (getUserMedia).");
-        return;
-      }
-
-      // Secure context required (https) — should already be true on Vercel
-      if (typeof window !== "undefined" && !window.isSecureContext) {
-        setCamError("Camera requires HTTPS. Open the cctvobserver.vercel.app link.");
-        return;
-      }
-
-      await new Promise((r) => setTimeout(r, 150));
-      if (cancelled) return;
-
-      const attempts: MediaStreamConstraints[] = [
-        {
-          video: {
-            facingMode: { ideal: facingMode },
-            width: { ideal: 640, max: 1280 },
-            height: { ideal: 480, max: 720 },
-          },
-          audio: false,
-        },
-        { video: { facingMode }, audio: false },
-        { video: { facingMode: { exact: facingMode } }, audio: false },
-        { video: true, audio: false },
-      ];
-
-      let stream: MediaStream | null = null;
-      let lastErr: unknown = null;
-      for (const constraints of attempts) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-          break;
-        } catch (err) {
-          lastErr = err;
+      if (facing === "environment") {
+        const hit = cams.find((c) => isBack(c.label));
+        if (hit) return hit.deviceId;
+        // Many Androids list back camera first when labels are empty
+        if (cams.length > 1 && cams.every((c) => !c.label)) return cams[0]!.deviceId;
+        if (cams.length > 1) {
+          const notFront = cams.find((c) => !isFront(c.label));
+          if (notFront) return notFront.deviceId;
         }
-      }
-
-      // Last resort: pick any videoinput deviceId
-      if (!stream) {
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const cams = devices.filter((d) => d.kind === "videoinput");
-          for (const cam of cams) {
-            if (!cam.deviceId) continue;
-            try {
-              stream = await navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { exact: cam.deviceId } },
-                audio: false,
-              });
-              break;
-            } catch (err) {
-              lastErr = err;
-            }
-          }
-        } catch (err) {
-          lastErr = err;
-        }
-      }
-
-      if (cancelled) {
-        stream?.getTracks().forEach((t) => t.stop());
-        return;
-      }
-
-      if (!stream) {
-        const name =
-          lastErr && typeof lastErr === "object" && "name" in lastErr
-            ? String((lastErr as { name: string }).name)
-            : "UnknownError";
-        const msg =
-          lastErr && typeof lastErr === "object" && "message" in lastErr
-            ? String((lastErr as { message: string }).message)
-            : String(lastErr ?? "");
-        setCamError(
-          `Webcam failed (${name}). ${msg || "Allow camera permission and tap Back to Webcam."}`
-        );
-        return;
-      }
-
-      streamRef.current = stream;
-      el.srcObject = stream;
-
-      const playCam = async () => {
-        try {
-          await el.play();
-        } catch (err) {
-          // Autoplay blocked — still may work after user tap; show hint
-          if (!cancelled) {
-            setCamError(
-              `Camera opened but playback blocked. Tap the video area. (${String(err)})`
-            );
-          }
-        }
-      };
-
-      el.onloadedmetadata = () => {
-        void playCam();
-      };
-      // Metadata often already available for live streams — don't wait forever
-      if (el.readyState >= 1) {
-        void playCam();
       } else {
-        // Fallback play after a short delay
-        setTimeout(() => {
-          if (!cancelled && el.paused) void playCam();
-        }, 500);
-      }
-
-      if ("wakeLock" in navigator) {
-        try {
-          await (
-            navigator as Navigator & {
-              wakeLock: { request: (t: string) => Promise<unknown> };
-            }
-          ).wakeLock.request("screen");
-        } catch {
-          // optional
+        const hit = cams.find((c) => isFront(c.label));
+        if (hit) return hit.deviceId;
+        if (cams.length > 1 && cams.every((c) => !c.label)) return cams[1]!.deviceId;
+        if (cams.length > 1) {
+          const notBack = cams.find((c) => !isBack(c.label));
+          if (notBack) return notBack.deviceId;
         }
       }
-    };
+      return cams[0]?.deviceId ?? null;
+    } catch {
+      return null;
+    }
+  };
 
-    void start();
+  const trackFacing = (stream: MediaStream): string | undefined => {
+    const track = stream.getVideoTracks()[0];
+    if (!track) return undefined;
+    const settings = track.getSettings?.() ?? {};
+    return settings.facingMode;
+  };
+
+  /**
+   * Open webcam for a facing mode. After the first grant, a short release
+   * delay is required on many phones when switching front ↔ back.
+   */
+  const startWebcam = async (facing: "environment" | "user") => {
+    setWebcamBusy(true);
+    setCamError(null);
+    setVideoSource("webcam");
+    setFacingMode(facing);
+
+    if (videoFileUrl) {
+      URL.revokeObjectURL(videoFileUrl);
+      setVideoFileUrl(null);
+    }
+
+    const el = videoRef.current;
+    if (!el) {
+      setCamError("Video element not ready. Reload the page.");
+      setWebcamBusy(false);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCamError("This browser does not support camera access.");
+      setWebcamBusy(false);
+      return;
+    }
+    if (!window.isSecureContext) {
+      setCamError("Camera requires HTTPS (use https://cctvobserver.vercel.app).");
+      setWebcamBusy(false);
+      return;
+    }
+
+    // Fully release the current camera before requesting the other one.
+    // Skipping this is the usual cause of "front works, back fails" on Android.
+    stopTracks();
+    resetVideoElement(el);
+    setWebcamLive(false);
+    await new Promise((r) => setTimeout(r, 350));
+
+    let stream: MediaStream | null = null;
+    let lastErr: unknown = null;
+
+    // 1) Prefer explicit deviceId (most reliable for back camera on Android)
+    const deviceId = await findCameraDeviceId(facing);
+    if (deviceId) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId } },
+          audio: false,
+        });
+      } catch (err) {
+        lastErr = err;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { ideal: deviceId } },
+            audio: false,
+          });
+        } catch (err2) {
+          lastErr = err2;
+        }
+      }
+    }
+
+    // 2) facingMode ideal (never use exact — fails hard on some devices)
+    if (!stream) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facing } },
+          audio: false,
+        });
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    // 3) facingMode string
+    if (!stream) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facing },
+          audio: false,
+        });
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    if (!stream) {
+      const name =
+        lastErr && typeof lastErr === "object" && "name" in lastErr
+          ? String((lastErr as { name: string }).name)
+          : "UnknownError";
+      const msg =
+        lastErr && typeof lastErr === "object" && "message" in lastErr
+          ? String((lastErr as { message: string }).message)
+          : "";
+      const which = facing === "environment" ? "back" : "front";
+      setCamError(
+        `Could not open ${which} camera (${name}). ${
+          msg || "Close other camera apps, then try again."
+        }`
+      );
+      setWebcamBusy(false);
+      return;
+    }
+
+    // If we asked for back but still got front, try the other device once
+    const actual = trackFacing(stream);
+    if (
+      facing === "environment" &&
+      actual === "user" &&
+      deviceId
+    ) {
+      // Try every other video device
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const others = devices.filter(
+          (d) => d.kind === "videoinput" && d.deviceId && d.deviceId !== deviceId
+        );
+        for (const cam of others) {
+          try {
+            const alt = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { exact: cam.deviceId } },
+              audio: false,
+            });
+            stream.getTracks().forEach((t) => t.stop());
+            stream = alt;
+            break;
+          } catch {
+            // try next
+          }
+        }
+      } catch {
+        // keep original stream
+      }
+    }
+
+    streamRef.current = stream;
+    el.srcObject = stream;
+
+    const finalFacing = trackFacing(stream);
+    if (facing === "environment" && finalFacing === "user") {
+      setCamError(
+        "Phone still opened the front camera. Tap Switch again, or check that no other app is using the back camera."
+      );
+    } else {
+      setCamError(null);
+    }
+
+    try {
+      await el.play();
+      setWebcamLive(true);
+    } catch (err) {
+      setWebcamLive(true);
+      setCamError(`Tap the video to start preview. (${String(err)})`);
+    }
+
+    setWebcamBusy(false);
+
+    if ("wakeLock" in navigator) {
+      try {
+        await (
+          navigator as Navigator & {
+            wakeLock: { request: (t: string) => Promise<unknown> };
+          }
+        ).wakeLock.request("screen");
+      } catch {
+        // optional
+      }
+    }
+  };
+
+  const startFile = (file: File) => {
+    stopTracks();
+    setWebcamLive(false);
+    setCamError(null);
+
+    const el = videoRef.current;
+    if (videoFileUrl) URL.revokeObjectURL(videoFileUrl);
+    const url = URL.createObjectURL(file);
+    setVideoFileUrl(url);
+    setVideoSource("file");
+
+    if (!el) return;
+    resetVideoElement(el);
+    el.loop = true;
+    el.src = url;
+    const playFile = () => {
+      void el.play().catch((err) => setCamError(`Video file play failed: ${String(err)}`));
+    };
+    el.onloadedmetadata = playFile;
+    if (el.readyState >= 1) playFile();
+  };
+
+  // Cleanup only on unmount — do NOT auto-start webcam in an effect
+  useEffect(() => {
     return () => {
-      cancelled = true;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+      stopTracks();
+      if (videoFileUrl) URL.revokeObjectURL(videoFileUrl);
     };
-  }, [facingMode, videoSource, videoFileUrl, videoRef]);
-
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const displayError = camError || wsError;
   const statusLabel =
@@ -589,11 +679,26 @@ export default function CameraNodePage({
             autoPlay
             onClick={() => {
               const el = videoRef.current;
-              if (el && el.paused) {
-                void el.play().then(() => setCamError(null)).catch(() => undefined);
-              }
+              if (!el) return;
+              void el.play().then(() => setCamError(null)).catch(() => undefined);
             }}
           />
+          {videoSource === "webcam" && !webcamLive && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 px-4">
+              <p className="text-white text-sm text-center">
+                Mobile browsers require a tap to open the camera.
+              </p>
+              <button
+                type="button"
+                disabled={webcamBusy}
+                onClick={() => void startWebcam(facingMode)}
+                className="px-6 py-3 rounded-xl text-sm font-bold active:scale-95"
+                style={{ backgroundColor: COLORS.safeGreen, color: "white" }}
+              >
+                {webcamBusy ? "Opening camera…" : "📷 Start Webcam"}
+              </button>
+            </div>
+          )}
         </div>
         <canvas ref={canvasRef} className="hidden" />
 
@@ -602,34 +707,53 @@ export default function CameraNodePage({
             <p className="font-medium text-lg">{camera?.name ?? cameraId}</p>
             <p className="text-sm text-white/70">{camera?.location ?? "Loading…"}</p>
             <p className="text-xs text-white/40 pt-1">
-              Source: {videoSource === "file" ? "Uploaded video" : `Webcam (${facingMode})`}
+              Source:{" "}
+              {videoSource === "file"
+                ? "Uploaded video"
+                : webcamLive
+                  ? `Webcam (${facingMode})`
+                  : "Webcam (not started)"}
             </p>
           </div>
 
           {videoSource === "webcam" ? (
-            <button
-              onClick={() =>
-                setFacingMode((prev) => (prev === "environment" ? "user" : "environment"))
-              }
-              className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
-              style={{
-                backgroundColor: "rgba(255,255,255,0.12)",
-                color: "white",
-                border: "1px solid rgba(255,255,255,0.2)",
-              }}
-            >
-              🔄 Switch to {facingMode === "environment" ? "Front" : "Back"} Camera
-            </button>
+            <>
+              <button
+                type="button"
+                disabled={webcamBusy}
+                onClick={() => void startWebcam(facingMode)}
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
+                style={{
+                  backgroundColor: COLORS.safeGreen,
+                  color: "white",
+                }}
+              >
+                {webcamBusy ? "Opening…" : webcamLive ? "🔄 Restart Webcam" : "📷 Start Webcam"}
+              </button>
+              <button
+                type="button"
+                disabled={webcamBusy}
+                onClick={() => {
+                  const next = facingMode === "environment" ? "user" : "environment";
+                  void startWebcam(next);
+                }}
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
+                style={{
+                  backgroundColor: "rgba(255,255,255,0.12)",
+                  color: "white",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                }}
+              >
+                {facingMode === "environment"
+                  ? "🔄 Switch to Front Camera"
+                  : "🔄 Switch to Back Camera"}
+              </button>
+            </>
           ) : (
             <button
-              onClick={() => {
-                if (videoFileUrl) {
-                  URL.revokeObjectURL(videoFileUrl);
-                  setVideoFileUrl(null);
-                }
-                setVideoSource("webcam");
-                setCamError(null);
-              }}
+              type="button"
+              disabled={webcamBusy}
+              onClick={() => void startWebcam(facingMode)}
               className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
               style={{
                 backgroundColor: "rgba(255,255,255,0.12)",
@@ -653,13 +777,7 @@ export default function CameraNodePage({
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) {
-                    if (videoFileUrl) URL.revokeObjectURL(videoFileUrl);
-                    setVideoFileUrl(URL.createObjectURL(file));
-                    setVideoSource("file");
-                    setCamError(null);
-                  }
-                  // allow re-selecting same file later
+                  if (file) startFile(file);
                   e.target.value = "";
                 }}
               />
