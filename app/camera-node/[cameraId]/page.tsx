@@ -7,6 +7,18 @@ import { createClient } from "@/lib/supabase";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
+const MAX_SEND_WIDTH = 640;
+const JPEG_QUALITY = 0.45;
+const FRAME_INTERVAL_MS = 450;
+const CLIENT_PING_MS = 15000;
+
+function buildWsUrl(orgId: string, cameraId: string): string {
+  const base = BACKEND_WS_URL.replace(/\/$/, "");
+  // https://… → wss://…  |  http://… → ws://…
+  const wsBase = base.replace(/^http/i, "ws");
+  return `${wsBase}/ws/stream/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
+}
+
 export default function CameraNodePage({
   params,
   searchParams,
@@ -21,9 +33,12 @@ export default function CameraNodePage({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intentionalCloseRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const [camera, setCamera] = useState<Camera | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
@@ -34,7 +49,13 @@ export default function CameraNodePage({
   const [videoSource, setVideoSource] = useState<"webcam" | "file">("webcam");
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
 
-  // Load camera metadata
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     if (!orgId || !cameraId) {
       setCamError("Missing orgId query parameter.");
@@ -47,60 +68,89 @@ export default function CameraNodePage({
         .eq("org_id", orgId)
         .eq("id", cameraId)
         .maybeSingle();
-      setCamera(data as Camera | null);
+      if (mountedRef.current) setCamera(data as Camera | null);
     };
     void loadCamera();
   }, [orgId, cameraId, supabase]);
 
-  // Connect WebSocket with retry logic
   const connectWebSocket = useCallback(() => {
-    if (!orgId) return;
+    if (!orgId || !mountedRef.current) return;
 
-    // Clean up any existing connection
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+
     if (wsRef.current) {
+      intentionalCloseRef.current = true;
       wsRef.current.onclose = null;
-      wsRef.current.close();
+      wsRef.current.onerror = null;
+      try {
+        wsRef.current.close();
+      } catch {
+        // ignore
+      }
       wsRef.current = null;
+      intentionalCloseRef.current = false;
     }
 
     setStatus("connecting");
-    const wsUrl = `${BACKEND_WS_URL.replace(/^http/, "ws")}/ws/stream/${orgId}/${cameraId}`;
-    const ws = new WebSocket(wsUrl);
+    const wsUrl = buildWsUrl(orgId, cameraId);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (e) {
+      setStatus("disconnected");
+      setWsError(
+        `Invalid WebSocket URL. Check NEXT_PUBLIC_BACKEND_WS_URL on Vercel. (${wsUrl})`
+      );
+      return;
+    }
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!mountedRef.current) return;
       setStatus("connected");
       setWsError(null);
       retryRef.current = 0;
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
+      if (!mountedRef.current) return;
       setStatus("disconnected");
-      const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
-      retryRef.current += 1;
+      if (intentionalCloseRef.current) return;
+
+      const attempt = retryRef.current + 1;
+      retryRef.current = attempt;
+      const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 4), 20000);
+
+      setWsError(
+        `Connection lost${ev.code ? ` (code ${ev.code})` : ""}. Retrying… (attempt ${attempt})`
+      );
+
       retryTimerRef.current = setTimeout(() => {
-        connectWebSocket();
+        if (mountedRef.current) connectWebSocket();
       }, delay);
     };
 
     ws.onerror = () => {
-      setWsError(
-        retryRef.current === 0
-          ? `WebSocket connection error. Target URL: ${wsUrl}. Verify backend deployment and configuration.`
-          : `Connection lost. Retrying... (attempt ${retryRef.current + 1})`
-      );
+      if (!mountedRef.current) return;
+      // onclose will fire after this; keep message useful on first failure
+      if (retryRef.current === 0) {
+        setWsError(
+          `WebSocket error. Target: ${wsUrl}. Confirm Railway is up and Vercel has NEXT_PUBLIC_BACKEND_WS_URL=wss://your-railway-host`
+        );
+      }
     };
 
     ws.onmessage = () => {
-      // Ignore server pings — we only send frames, not receive
+      // Server keepalive pings — ignore
     };
   }, [orgId, cameraId]);
 
-  // Start camera hardware with fallback
   const startCamera = useCallback(async () => {
     setCamError(null);
 
-    // Stop any existing stream to release camera hardware
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -121,16 +171,20 @@ export default function CameraNodePage({
       return;
     }
 
-    // Give hardware time to release (important on Android)
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    // Try multiple constraint strategies for camera access
+    // Cap capture resolution — full HD frames drop mobile WebSockets
     const constraintAttempts: MediaStreamConstraints[] = [
-      // 1. Exact facing mode (most reliable for camera selection)
-      { video: { facingMode: { exact: facingMode } }, audio: false },
-      // 2. Ideal facing mode (fallback if exact fails)
+      {
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 640, max: 960 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 10, max: 15 },
+        },
+        audio: false,
+      },
       { video: { facingMode: { ideal: facingMode } }, audio: false },
-      // 3. Any available camera (last resort)
       { video: true, audio: false },
     ];
 
@@ -138,14 +192,14 @@ export default function CameraNodePage({
     for (const constraints of constraintAttempts) {
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
-        break; // success
+        break;
       } catch {
-        // try next constraint set
+        // try next
       }
     }
 
     if (!stream) {
-      setCamError("Camera access denied. Please allow camera permissions and reload.");
+      setCamError("Camera access denied. Allow camera permissions and reload.");
       return;
     }
 
@@ -153,7 +207,6 @@ export default function CameraNodePage({
 
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
-      // Wait for video metadata to be ready before playing
       videoRef.current.onloadedmetadata = () => {
         videoRef.current?.play().catch((playErr) => {
           console.warn("Auto-play failed:", playErr);
@@ -161,43 +214,70 @@ export default function CameraNodePage({
       };
     }
 
-    // Keep screen awake
     if ("wakeLock" in navigator) {
       try {
-        await (navigator as Navigator & { wakeLock: { request: (t: string) => Promise<unknown> } }).wakeLock.request("screen");
+        await (
+          navigator as Navigator & {
+            wakeLock: { request: (t: string) => Promise<unknown> };
+          }
+        ).wakeLock.request("screen");
       } catch {
         // optional
       }
     }
   }, [facingMode, videoSource, videoFileUrl]);
 
-  // Frame sending interval — runs independently of WebSocket state
+  // Send downscaled JPEG frames + client keepalive pings
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
+    if (pingRef.current) clearInterval(pingRef.current);
 
     intervalRef.current = setInterval(() => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       const ws = wsRef.current;
       if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!video.videoWidth || !video.videoHeight) return; // video not ready yet
+      if (!video.videoWidth || !video.videoHeight) return;
 
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
+      const w = Math.max(2, Math.round(video.videoWidth * scale));
+      const h = Math.max(2, Math.round(video.videoHeight * scale));
+      // Even dims help downstream H.264 encode
+      canvas.width = w - (w % 2);
+      canvas.height = h - (h % 2);
+
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      ctx.drawImage(video, 0, 0);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
-      ws.send(JSON.stringify({ frame: dataUrl }));
-      setFrameCount((c) => c + 1);
-    }, 300);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+
+      try {
+        // Skip if still huge (rare) — prevents proxy disconnects
+        if (dataUrl.length > 350_000) return;
+        ws.send(JSON.stringify({ frame: dataUrl }));
+        setFrameCount((c) => c + 1);
+      } catch {
+        // send failed — onclose will reconnect
+      }
+    }, FRAME_INTERVAL_MS);
+
+    // Keep mobile NATs from killing the socket when frames briefly pause
+    pingRef.current = setInterval(() => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ type: "ping" }));
+      } catch {
+        // ignore
+      }
+    }, CLIENT_PING_MS);
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      if (pingRef.current) clearInterval(pingRef.current);
     };
   }, []);
 
-  // Start camera on mount and when facingMode changes
   useEffect(() => {
     void startCamera();
     return () => {
@@ -205,20 +285,21 @@ export default function CameraNodePage({
     };
   }, [startCamera]);
 
-  // Manage WebSocket lifecycle separately
   useEffect(() => {
+    intentionalCloseRef.current = false;
     connectWebSocket();
     return () => {
+      intentionalCloseRef.current = true;
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
         wsRef.current.close();
         wsRef.current = null;
       }
     };
   }, [connectWebSocket]);
 
-  // Toggle between front and back camera
   const toggleCamera = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
   };
@@ -252,6 +333,8 @@ export default function CameraNodePage({
         ? COLORS.cautionAmber
         : COLORS.alertRed;
 
+  const wsTarget = orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)";
+
   return (
     <div
       className="min-h-screen flex flex-col"
@@ -272,23 +355,27 @@ export default function CameraNodePage({
 
       <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
         {displayError && (
-          <p className="text-center text-sm" style={{ color: COLORS.alertRed }}>
+          <p className="text-center text-sm max-w-lg px-2" style={{ color: COLORS.alertRed }}>
             {displayError}
           </p>
         )}
         <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
-          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted autoPlay />
+          <video
+            ref={videoRef}
+            className="w-full h-full object-cover"
+            playsInline
+            muted
+            autoPlay
+          />
         </div>
         <canvas ref={canvasRef} className="hidden" />
 
-        {/* Camera info + controls */}
         <div className="text-center text-white space-y-3">
           <div>
             <p className="font-medium text-lg">{camera?.name ?? cameraId}</p>
             <p className="text-sm text-white/70">{camera?.location ?? "Loading…"}</p>
           </div>
 
-          {/* Toggle camera button */}
           {videoSource === "webcam" ? (
             <button
               onClick={toggleCamera}
@@ -315,7 +402,6 @@ export default function CameraNodePage({
             </button>
           )}
 
-          {/* Upload Video File Button */}
           <div className="pt-2">
             <label
               className="cursor-pointer px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 inline-block active:scale-95"
@@ -326,19 +412,24 @@ export default function CameraNodePage({
               }}
             >
               📁 Test with Video File
-              <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+              <input
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={handleFileUpload}
+              />
             </label>
           </div>
 
-          {/* Frame counter */}
           {status === "connected" && (
-            <p className="text-xs text-white/40">
-              {frameCount} frames sent
-            </p>
+            <p className="text-xs text-white/40">{frameCount} frames sent</p>
           )}
+
+          <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">
+            {wsTarget}
+          </p>
         </div>
       </main>
     </div>
   );
 }
-
