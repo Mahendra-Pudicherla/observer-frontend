@@ -13,9 +13,9 @@ import { createClient } from "@/lib/supabase";
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type Transport = "http" | "ws" | "none";
 
-const MAX_SEND_WIDTH = 480;
-const JPEG_QUALITY = 0.4;
-const FRAME_INTERVAL_MS = 500;
+const MAX_SEND_WIDTH = 360;
+const JPEG_QUALITY = 0.35;
+const FRAME_INTERVAL_MS = 700;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
@@ -23,14 +23,23 @@ function buildWsUrl(orgId: string, cameraId: string): string {
   return `${wsBase}/ws/stream/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
 }
 
+/** Same-origin proxy — avoids mobile cross-origin "Failed to fetch" to Railway. */
 function buildIngestUrl(orgId: string, cameraId: string): string {
-  const base = BACKEND_API_URL.replace(/\/$/, "");
-  return `${base}/ingest/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
+  return `/api/ingest/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
+}
+
+function canvasToJpegBlob(
+  canvas: HTMLCanvasElement,
+  quality: number
+): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+  });
 }
 
 /**
- * Camera uplink prefers HTTP POST (/ingest) — works on mobile carriers and
- * in-app browsers that drop WebSockets. WebSocket is used when it stays open.
+ * Camera uplink uses same-origin HTTP POST (Vercel → Railway proxy).
+ * WebSocket is optional when the carrier allows it.
  */
 function useCameraStream(orgId: string | undefined, cameraId: string) {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
@@ -38,18 +47,14 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
   const [transport, setTransport] = useState<Transport>("none");
   const [frameCount, setFrameCount] = useState(0);
   const [lastCloseCode, setLastCloseCode] = useState<number | null>(null);
+  const [lastHttpDetail, setLastHttpDetail] = useState<string>("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const orgIdRef = useRef(orgId);
-  const cameraIdRef = useRef(cameraId);
   const transportRef = useRef<Transport>("none");
   const inflightRef = useRef(false);
   const failStreakRef = useRef(0);
-
-  orgIdRef.current = orgId;
-  cameraIdRef.current = cameraId;
 
   useEffect(() => {
     let stopped = false;
@@ -69,28 +74,37 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
     const ingestUrl = buildIngestUrl(oid, cameraId);
     const wsUrl = buildWsUrl(oid, cameraId);
 
-    // Probe HTTP API first — if this fails, nothing will work
+    // Probe same-origin proxy with a tiny JPEG
     void (async () => {
       try {
-        const healthBase = BACKEND_API_URL.replace(/\/$/, "");
-        const res = await fetch(`${healthBase}/health`, { cache: "no-store" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // 1x1 pixel jpeg
+        const tiny = Uint8Array.from(atob(
+          "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAn/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAGfAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAQUCf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQMBAT8Bf//EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQIBAT8Bf//Z"
+        ), (c) => c.charCodeAt(0));
+        const res = await fetch(ingestUrl, {
+          method: "POST",
+          headers: { "Content-Type": "image/jpeg" },
+          body: tiny,
+          cache: "no-store",
+        });
+        const text = await res.text();
+        if (!res.ok) {
+          throw new Error(`probe HTTP ${res.status}: ${text.slice(0, 120)}`);
+        }
         if (!stopped) {
+          setLastHttpDetail("probe ok");
           setStatus("connecting");
           setWsError(null);
         }
       } catch (err) {
         if (stopped) return;
-        setStatus("disconnected");
+        setLastHttpDetail(err instanceof Error ? err.message : "probe failed");
         setWsError(
-          `Cannot reach backend API (${BACKEND_API_URL}). Check NEXT_PUBLIC_BACKEND_API_URL. ${
-            err instanceof Error ? err.message : ""
-          }`
+          `Upload probe failed. ${err instanceof Error ? err.message : ""}`
         );
       }
     })();
 
-    // Optional WebSocket — nice when it works, not required
     let wsRetryTimer: ReturnType<typeof setTimeout> | null = null;
     let wsAttempts = 0;
 
@@ -125,7 +139,6 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
 
       ws.onopen = () => {
         if (stopped || wsRef.current !== ws) return;
-        // Prefer WS when open
         transportRef.current = "ws";
         setTransport("ws");
         setStatus("connected");
@@ -156,7 +169,6 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
           setTransport("http");
         }
         if (stopped) return;
-        // Keep retrying WS in background; HTTP carries frames
         const delay = Math.min(3000 * Math.min(wsAttempts, 6), 20000);
         wsRetryTimer = setTimeout(openWs, delay);
       };
@@ -164,18 +176,19 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
 
     openWs();
 
-    const sendFrameHttp = async (dataUrl: string) => {
+    const sendFrameHttp = async (blob: Blob) => {
       if (inflightRef.current) return;
       inflightRef.current = true;
       try {
         const res = await fetch(ingestUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frame: dataUrl }),
+          headers: { "Content-Type": "image/jpeg" },
+          body: blob,
           cache: "no-store",
         });
         if (!res.ok) {
-          throw new Error(`ingest HTTP ${res.status}`);
+          const text = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
         }
         failStreakRef.current = 0;
         if (transportRef.current !== "ws") {
@@ -184,16 +197,15 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
         }
         setStatus("connected");
         setWsError(null);
+        setLastHttpDetail(`ok ${blob.size}b`);
         setFrameCount((c) => c + 1);
       } catch (err) {
         failStreakRef.current += 1;
+        const msg = err instanceof Error ? err.message : "network error";
+        setLastHttpDetail(msg);
         if (failStreakRef.current >= 3 && transportRef.current !== "ws") {
           setStatus("disconnected");
-          setWsError(
-            `Frame upload failed (${failStreakRef.current}x). ${
-              err instanceof Error ? err.message : "network error"
-            }`
-          );
+          setWsError(`Frame upload failed (${failStreakRef.current}x). ${msg}`);
           setTransport("none");
           transportRef.current = "none";
         }
@@ -220,25 +232,32 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.drawImage(video, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-      if (dataUrl.length > 200_000) return;
 
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ frame: dataUrl }));
-          setFrameCount((c) => c + 1);
-          transportRef.current = "ws";
-          setTransport("ws");
-          setStatus("connected");
-          setWsError(null);
-          return;
-        } catch {
-          // fall through to HTTP
+      void (async () => {
+        const blob = await canvasToJpegBlob(canvas, JPEG_QUALITY);
+        if (!blob || blob.size > 120_000) return;
+
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            // WS still uses compact data URL when available
+            const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+            if (dataUrl.length <= 200_000) {
+              ws.send(JSON.stringify({ frame: dataUrl }));
+              setFrameCount((c) => c + 1);
+              transportRef.current = "ws";
+              setTransport("ws");
+              setStatus("connected");
+              setWsError(null);
+              return;
+            }
+          } catch {
+            // fall through
+          }
         }
-      }
 
-      void sendFrameHttp(dataUrl);
+        await sendFrameHttp(blob);
+      })();
     }, FRAME_INTERVAL_MS);
 
     const onVisible = () => {
@@ -260,19 +279,7 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
   }, [orgId, cameraId]);
 
   const reconnectNow = () => {
-    // Force a new effect cycle by toggling via location reload is heavy;
-    // instead poke HTTP health and reopen WS.
-    failStreakRef.current = 0;
-    setStatus("connecting");
-    setWsError(null);
-    const ws = wsRef.current;
-    if (ws) {
-      try {
-        ws.close(1000, "reconnect");
-      } catch {
-        // ignore
-      }
-    }
+    window.location.reload();
   };
 
   return {
@@ -281,11 +288,13 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
     transport,
     frameCount,
     lastCloseCode,
+    lastHttpDetail,
     videoRef,
     canvasRef,
     reconnectNow,
     wsTarget: orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)",
     httpTarget: orgId ? buildIngestUrl(orgId, cameraId) : "(missing orgId)",
+    apiTarget: BACKEND_API_URL,
   };
 }
 
@@ -313,11 +322,13 @@ export default function CameraNodePage({
     transport,
     frameCount,
     lastCloseCode,
+    lastHttpDetail,
     videoRef,
     canvasRef,
     reconnectNow,
     wsTarget,
     httpTarget,
+    apiTarget,
   } = useCameraStream(orgId, cameraId);
 
   useEffect(() => {
@@ -369,9 +380,9 @@ export default function CameraNodePage({
         {
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 480, max: 640 },
-            height: { ideal: 360, max: 480 },
-            frameRate: { ideal: 8, max: 12 },
+            width: { ideal: 360, max: 480 },
+            height: { ideal: 270, max: 360 },
+            frameRate: { ideal: 6, max: 10 },
           },
           audio: false,
         },
@@ -531,10 +542,7 @@ export default function CameraNodePage({
 
           <button
             type="button"
-            onClick={() => {
-              reconnectNow();
-              window.location.reload();
-            }}
+            onClick={reconnectNow}
             className="px-4 py-2 rounded-xl text-xs font-semibold"
             style={{
               border: "1px solid rgba(255,255,255,0.2)",
@@ -552,14 +560,15 @@ export default function CameraNodePage({
           )}
 
           <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">
-            HTTP: {httpTarget}
+            Upload: {httpTarget}
+            {lastHttpDetail ? ` · ${lastHttpDetail}` : ""}
+          </p>
+          <p className="text-[10px] text-white/20 break-all max-w-sm mx-auto px-2">
+            API: {apiTarget}
           </p>
           <p className="text-[10px] text-white/20 break-all max-w-sm mx-auto px-2">
             WS: {wsTarget}
             {lastCloseCode != null ? ` · last close ${lastCloseCode}` : ""}
-          </p>
-          <p className="text-[10px] text-white/25 max-w-sm mx-auto px-2">
-            Tip: open this page in Chrome (not WhatsApp/Instagram browser).
           </p>
         </div>
       </main>
