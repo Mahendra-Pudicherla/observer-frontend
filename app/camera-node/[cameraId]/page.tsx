@@ -219,6 +219,12 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (!video || !canvas) return;
+
+      // Webcam often needs an explicit play kick on mobile
+      if (video.paused && video.srcObject) {
+        void video.play().catch(() => undefined);
+      }
+
       if (!video.videoWidth || !video.videoHeight) return;
 
       const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
@@ -350,53 +356,121 @@ export default function CameraNodePage({
   useEffect(() => {
     let cancelled = false;
 
+    const resetVideoElement = (el: HTMLVideoElement) => {
+      try {
+        el.pause();
+      } catch {
+        // ignore
+      }
+      el.onloadedmetadata = null;
+      el.onloadeddata = null;
+      el.onerror = null;
+      el.removeAttribute("src");
+      el.srcObject = null;
+      // Critical on mobile Chrome after blob/file playback
+      try {
+        el.load();
+      } catch {
+        // ignore
+      }
+    };
+
     const start = async () => {
       setCamError(null);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-      const el = videoRef.current;
-      if (el) {
-        el.srcObject = null;
-        el.src = "";
-      }
 
-      if (videoSource === "file" && videoFileUrl) {
-        if (el) {
-          el.src = videoFileUrl;
-          el.loop = true;
-          el.onloadedmetadata = () => {
-            el.play().catch(() => undefined);
-          };
-        }
+      const el = videoRef.current;
+      if (!el) {
+        setCamError("Video element not ready. Tap Reconnect.");
         return;
       }
 
-      await new Promise((r) => setTimeout(r, 200));
+      resetVideoElement(el);
+      el.muted = true;
+      el.defaultMuted = true;
+      el.playsInline = true;
+      el.setAttribute("playsinline", "true");
+      el.setAttribute("webkit-playsinline", "true");
+      el.autoplay = true;
+
+      // ── File / uploaded video ──────────────────────────────────
+      if (videoSource === "file" && videoFileUrl) {
+        el.loop = true;
+        el.src = videoFileUrl;
+        const playFile = () => {
+          el.play().catch((err) => {
+            if (!cancelled) {
+              setCamError(`Video file play failed: ${String(err)}`);
+            }
+          });
+        };
+        el.onloadedmetadata = playFile;
+        if (el.readyState >= 1) playFile();
+        return;
+      }
+
+      // ── Webcam ────────────────────────────────────────────────
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCamError("This browser does not support camera access (getUserMedia).");
+        return;
+      }
+
+      // Secure context required (https) — should already be true on Vercel
+      if (typeof window !== "undefined" && !window.isSecureContext) {
+        setCamError("Camera requires HTTPS. Open the cctvobserver.vercel.app link.");
+        return;
+      }
+
+      await new Promise((r) => setTimeout(r, 150));
       if (cancelled) return;
 
       const attempts: MediaStreamConstraints[] = [
         {
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 360, max: 480 },
-            height: { ideal: 270, max: 360 },
-            frameRate: { ideal: 6, max: 10 },
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
           },
           audio: false,
         },
-        { video: { facingMode: { ideal: facingMode } }, audio: false },
+        { video: { facingMode }, audio: false },
+        { video: { facingMode: { exact: facingMode } }, audio: false },
         { video: true, audio: false },
       ];
 
       let stream: MediaStream | null = null;
+      let lastErr: unknown = null;
       for (const constraints of attempts) {
         try {
           stream = await navigator.mediaDevices.getUserMedia(constraints);
           break;
-        } catch {
-          // next
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+
+      // Last resort: pick any videoinput deviceId
+      if (!stream) {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const cams = devices.filter((d) => d.kind === "videoinput");
+          for (const cam of cams) {
+            if (!cam.deviceId) continue;
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: cam.deviceId } },
+                audio: false,
+              });
+              break;
+            } catch (err) {
+              lastErr = err;
+            }
+          }
+        } catch (err) {
+          lastErr = err;
         }
       }
 
@@ -406,16 +480,47 @@ export default function CameraNodePage({
       }
 
       if (!stream) {
-        setCamError("Camera access denied. Allow camera permissions and reload.");
+        const name =
+          lastErr && typeof lastErr === "object" && "name" in lastErr
+            ? String((lastErr as { name: string }).name)
+            : "UnknownError";
+        const msg =
+          lastErr && typeof lastErr === "object" && "message" in lastErr
+            ? String((lastErr as { message: string }).message)
+            : String(lastErr ?? "");
+        setCamError(
+          `Webcam failed (${name}). ${msg || "Allow camera permission and tap Back to Webcam."}`
+        );
         return;
       }
 
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch(() => undefined);
-        };
+      el.srcObject = stream;
+
+      const playCam = async () => {
+        try {
+          await el.play();
+        } catch (err) {
+          // Autoplay blocked — still may work after user tap; show hint
+          if (!cancelled) {
+            setCamError(
+              `Camera opened but playback blocked. Tap the video area. (${String(err)})`
+            );
+          }
+        }
+      };
+
+      el.onloadedmetadata = () => {
+        void playCam();
+      };
+      // Metadata often already available for live streams — don't wait forever
+      if (el.readyState >= 1) {
+        void playCam();
+      } else {
+        // Fallback play after a short delay
+        setTimeout(() => {
+          if (!cancelled && el.paused) void playCam();
+        }, 500);
       }
 
       if ("wakeLock" in navigator) {
@@ -438,6 +543,7 @@ export default function CameraNodePage({
       streamRef.current = null;
     };
   }, [facingMode, videoSource, videoFileUrl, videoRef]);
+
 
   const displayError = camError || wsError;
   const statusLabel =
@@ -481,6 +587,12 @@ export default function CameraNodePage({
             playsInline
             muted
             autoPlay
+            onClick={() => {
+              const el = videoRef.current;
+              if (el && el.paused) {
+                void el.play().then(() => setCamError(null)).catch(() => undefined);
+              }
+            }}
           />
         </div>
         <canvas ref={canvasRef} className="hidden" />
@@ -489,6 +601,9 @@ export default function CameraNodePage({
           <div>
             <p className="font-medium text-lg">{camera?.name ?? cameraId}</p>
             <p className="text-sm text-white/70">{camera?.location ?? "Loading…"}</p>
+            <p className="text-xs text-white/40 pt-1">
+              Source: {videoSource === "file" ? "Uploaded video" : `Webcam (${facingMode})`}
+            </p>
           </div>
 
           {videoSource === "webcam" ? (
@@ -507,7 +622,14 @@ export default function CameraNodePage({
             </button>
           ) : (
             <button
-              onClick={() => setVideoSource("webcam")}
+              onClick={() => {
+                if (videoFileUrl) {
+                  URL.revokeObjectURL(videoFileUrl);
+                  setVideoFileUrl(null);
+                }
+                setVideoSource("webcam");
+                setCamError(null);
+              }}
               className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
               style={{
                 backgroundColor: "rgba(255,255,255,0.12)",
@@ -532,9 +654,13 @@ export default function CameraNodePage({
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) {
+                    if (videoFileUrl) URL.revokeObjectURL(videoFileUrl);
                     setVideoFileUrl(URL.createObjectURL(file));
                     setVideoSource("file");
+                    setCamError(null);
                   }
+                  // allow re-selecting same file later
+                  e.target.value = "";
                 }}
               />
             </label>
