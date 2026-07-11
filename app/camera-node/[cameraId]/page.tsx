@@ -7,14 +7,13 @@ import { createClient } from "@/lib/supabase";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
-const MAX_SEND_WIDTH = 640;
-const JPEG_QUALITY = 0.45;
-const FRAME_INTERVAL_MS = 450;
-const CLIENT_PING_MS = 15000;
+const MAX_SEND_WIDTH = 480;
+const JPEG_QUALITY = 0.4;
+const FRAME_INTERVAL_MS = 500;
+const CLIENT_PING_MS = 12000;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
-  // https://… → wss://…  |  http://… → ws://…
   const wsBase = base.replace(/^http/i, "ws");
   return `${wsBase}/ws/stream/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
 }
@@ -37,8 +36,8 @@ export default function CameraNodePage({
   const streamRef = useRef<MediaStream | null>(null);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const intentionalCloseRef = useRef(false);
-  const mountedRef = useRef(true);
+  const connIdRef = useRef(0);
+  const aliveRef = useRef(true);
 
   const [camera, setCamera] = useState<Camera | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
@@ -48,11 +47,12 @@ export default function CameraNodePage({
   const [frameCount, setFrameCount] = useState(0);
   const [videoSource, setVideoSource] = useState<"webcam" | "file">("webcam");
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
+  const [serverReady, setServerReady] = useState(false);
 
   useEffect(() => {
-    mountedRef.current = true;
+    aliveRef.current = true;
     return () => {
-      mountedRef.current = false;
+      aliveRef.current = false;
     };
   }, []);
 
@@ -61,92 +61,131 @@ export default function CameraNodePage({
       setCamError("Missing orgId query parameter.");
       return;
     }
-    const loadCamera = async () => {
+    void (async () => {
       const { data } = await supabase
         .from("cameras")
         .select("*")
         .eq("org_id", orgId)
         .eq("id", cameraId)
         .maybeSingle();
-      if (mountedRef.current) setCamera(data as Camera | null);
-    };
-    void loadCamera();
+      if (aliveRef.current) setCamera(data as Camera | null);
+    })();
   }, [orgId, cameraId, supabase]);
 
+  const disconnectWs = useCallback((scheduleRetry: boolean) => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (ws) {
+      try {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1000, "client disconnect");
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!scheduleRetry || !aliveRef.current || !orgId) return;
+
+    const attempt = retryRef.current + 1;
+    retryRef.current = attempt;
+    // Longer backoff for 1006 / mobile networks
+    const delay = Math.min(1500 * 2 ** Math.min(attempt - 1, 4), 25000);
+    setStatus("disconnected");
+    setServerReady(false);
+    setWsError(`Connection lost. Retrying… (attempt ${attempt})`);
+
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = setTimeout(() => {
+      if (aliveRef.current) connectWebSocket();
+    }, delay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId]);
+
   const connectWebSocket = useCallback(() => {
-    if (!orgId || !mountedRef.current) return;
+    if (!orgId || !aliveRef.current) return;
+
+    // Already connected / connecting — do not open a second socket
+    const existing = wsRef.current;
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN ||
+        existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
 
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
 
-    if (wsRef.current) {
-      intentionalCloseRef.current = true;
-      wsRef.current.onclose = null;
-      wsRef.current.onerror = null;
-      try {
-        wsRef.current.close();
-      } catch {
-        // ignore
-      }
-      wsRef.current = null;
-      intentionalCloseRef.current = false;
-    }
-
+    const myId = ++connIdRef.current;
     setStatus("connecting");
+    setServerReady(false);
+
     const wsUrl = buildWsUrl(orgId, cameraId);
     let ws: WebSocket;
     try {
       ws = new WebSocket(wsUrl);
-    } catch (e) {
+    } catch {
       setStatus("disconnected");
-      setWsError(
-        `Invalid WebSocket URL. Check NEXT_PUBLIC_BACKEND_WS_URL on Vercel. (${wsUrl})`
-      );
+      setWsError(`Invalid WebSocket URL: ${wsUrl}`);
       return;
     }
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (!mountedRef.current) return;
+      if (!aliveRef.current || myId !== connIdRef.current) return;
       setStatus("connected");
       setWsError(null);
       retryRef.current = 0;
     };
 
-    ws.onclose = (ev) => {
-      if (!mountedRef.current) return;
-      setStatus("disconnected");
-      if (intentionalCloseRef.current) return;
-
-      const attempt = retryRef.current + 1;
-      retryRef.current = attempt;
-      const delay = Math.min(1000 * 2 ** Math.min(attempt - 1, 4), 20000);
-
-      setWsError(
-        `Connection lost${ev.code ? ` (code ${ev.code})` : ""}. Retrying… (attempt ${attempt})`
-      );
-
-      retryTimerRef.current = setTimeout(() => {
-        if (mountedRef.current) connectWebSocket();
-      }, delay);
+    ws.onmessage = (event) => {
+      if (!aliveRef.current || myId !== connIdRef.current) return;
+      try {
+        const data = JSON.parse(String(event.data)) as { type?: string };
+        if (data.type === "ready" || data.type === "ping") {
+          setServerReady(true);
+          setStatus("connected");
+          setWsError(null);
+        }
+      } catch {
+        // ignore non-JSON
+      }
     };
 
     ws.onerror = () => {
-      if (!mountedRef.current) return;
-      // onclose will fire after this; keep message useful on first failure
+      // onclose handles retry; keep first-error hint
+      if (!aliveRef.current || myId !== connIdRef.current) return;
       if (retryRef.current === 0) {
         setWsError(
-          `WebSocket error. Target: ${wsUrl}. Confirm Railway is up and Vercel has NEXT_PUBLIC_BACKEND_WS_URL=wss://your-railway-host`
+          `WebSocket error. Check Railway is online. URL: ${wsUrl}`
         );
       }
     };
 
-    ws.onmessage = () => {
-      // Server keepalive pings — ignore
+    ws.onclose = (ev) => {
+      if (myId !== connIdRef.current) return;
+      if (!aliveRef.current) return;
+
+      // Normal close from our own disconnectWs(false) during unmount
+      if (ev.code === 1000) {
+        setStatus("disconnected");
+        return;
+      }
+
+      setWsError(
+        `Connection lost (code ${ev.code || 1006}). Retrying… (attempt ${retryRef.current + 1})`
+      );
+      disconnectWs(true);
     };
-  }, [orgId, cameraId]);
+  }, [orgId, cameraId, disconnectWs]);
 
   const startCamera = useCallback(async () => {
     setCamError(null);
@@ -165,22 +204,21 @@ export default function CameraNodePage({
         videoRef.current.src = videoFileUrl;
         videoRef.current.loop = true;
         videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch((playErr) => console.warn("Play failed:", playErr));
+          videoRef.current?.play().catch(() => undefined);
         };
       }
       return;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((r) => setTimeout(r, 250));
 
-    // Cap capture resolution — full HD frames drop mobile WebSockets
-    const constraintAttempts: MediaStreamConstraints[] = [
+    const attempts: MediaStreamConstraints[] = [
       {
         video: {
           facingMode: { ideal: facingMode },
-          width: { ideal: 640, max: 960 },
-          height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 10, max: 15 },
+          width: { ideal: 480, max: 640 },
+          height: { ideal: 360, max: 480 },
+          frameRate: { ideal: 8, max: 12 },
         },
         audio: false,
       },
@@ -189,12 +227,12 @@ export default function CameraNodePage({
     ];
 
     let stream: MediaStream | null = null;
-    for (const constraints of constraintAttempts) {
+    for (const constraints of attempts) {
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
         break;
       } catch {
-        // try next
+        // next
       }
     }
 
@@ -204,13 +242,10 @@ export default function CameraNodePage({
     }
 
     streamRef.current = stream;
-
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
       videoRef.current.onloadedmetadata = () => {
-        videoRef.current?.play().catch((playErr) => {
-          console.warn("Auto-play failed:", playErr);
-        });
+        videoRef.current?.play().catch(() => undefined);
       };
     }
 
@@ -227,7 +262,7 @@ export default function CameraNodePage({
     }
   }, [facingMode, videoSource, videoFileUrl]);
 
-  // Send downscaled JPEG frames + client keepalive pings
+  // Frames + ping — only after socket is open
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
     if (pingRef.current) clearInterval(pingRef.current);
@@ -240,28 +275,27 @@ export default function CameraNodePage({
       if (!video.videoWidth || !video.videoHeight) return;
 
       const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
-      const w = Math.max(2, Math.round(video.videoWidth * scale));
-      const h = Math.max(2, Math.round(video.videoHeight * scale));
-      // Even dims help downstream H.264 encode
-      canvas.width = w - (w % 2);
-      canvas.height = h - (h % 2);
+      let w = Math.max(2, Math.round(video.videoWidth * scale));
+      let h = Math.max(2, Math.round(video.videoHeight * scale));
+      w -= w % 2;
+      h -= h % 2;
+      canvas.width = w;
+      canvas.height = h;
 
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, 0, 0, w, h);
       const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (dataUrl.length > 220_000) return;
 
       try {
-        // Skip if still huge (rare) — prevents proxy disconnects
-        if (dataUrl.length > 350_000) return;
         ws.send(JSON.stringify({ frame: dataUrl }));
         setFrameCount((c) => c + 1);
       } catch {
-        // send failed — onclose will reconnect
+        // onclose will retry
       }
     }, FRAME_INTERVAL_MS);
 
-    // Keep mobile NATs from killing the socket when frames briefly pause
     pingRef.current = setInterval(() => {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -285,20 +319,43 @@ export default function CameraNodePage({
     };
   }, [startCamera]);
 
+  // Connect once per org/camera — avoid Strict Mode double-close races
   useEffect(() => {
-    intentionalCloseRef.current = false;
+    if (!orgId) return;
+    aliveRef.current = true;
+    retryRef.current = 0;
     connectWebSocket();
-    return () => {
-      intentionalCloseRef.current = true;
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.close();
-        wsRef.current = null;
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        retryRef.current = 0;
+        connectWebSocket();
       }
     };
-  }, [connectWebSocket]);
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      // Bump conn id so in-flight handlers ignore events
+      connIdRef.current += 1;
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        try {
+          ws.close(1000, "unmount");
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [orgId, cameraId, connectWebSocket]);
 
   const toggleCamera = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
@@ -307,25 +364,20 @@ export default function CameraNodePage({
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const url = URL.createObjectURL(file);
-      setVideoFileUrl(url);
+      setVideoFileUrl(URL.createObjectURL(file));
       setVideoSource("file");
     }
   };
 
-  const switchToWebcam = () => {
-    setVideoSource("webcam");
-  };
-
   const displayError = camError || wsError;
-
   const statusLabel =
     status === "connected"
-      ? "● Streaming"
+      ? serverReady
+        ? "● Streaming"
+        : "● Connected"
       : status === "connecting"
-        ? "Reconnecting…"
+        ? "Connecting…"
         : "Disconnected";
-
   const statusColor =
     status === "connected"
       ? COLORS.safeGreen
@@ -336,18 +388,12 @@ export default function CameraNodePage({
   const wsTarget = orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)";
 
   return (
-    <div
-      className="min-h-screen flex flex-col"
-      style={{ backgroundColor: COLORS.midnight }}
-    >
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: COLORS.midnight }}>
       <header className="p-4 flex items-center justify-between">
         <Logo size="sm" />
         <span
           className="text-sm font-medium px-3 py-1.5 rounded-full"
-          style={{
-            backgroundColor: statusColor,
-            color: "white",
-          }}
+          style={{ backgroundColor: statusColor, color: "white" }}
         >
           {statusLabel}
         </span>
@@ -359,14 +405,9 @@ export default function CameraNodePage({
             {displayError}
           </p>
         )}
+
         <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
-          <video
-            ref={videoRef}
-            className="w-full h-full object-cover"
-            playsInline
-            muted
-            autoPlay
-          />
+          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted autoPlay />
         </div>
         <canvas ref={canvasRef} className="hidden" />
 
@@ -379,7 +420,7 @@ export default function CameraNodePage({
           {videoSource === "webcam" ? (
             <button
               onClick={toggleCamera}
-              className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
+              className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
               style={{
                 backgroundColor: "rgba(255,255,255,0.12)",
                 color: "white",
@@ -390,8 +431,8 @@ export default function CameraNodePage({
             </button>
           ) : (
             <button
-              onClick={switchToWebcam}
-              className="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 active:scale-95"
+              onClick={() => setVideoSource("webcam")}
+              className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
               style={{
                 backgroundColor: "rgba(255,255,255,0.12)",
                 color: "white",
@@ -404,30 +445,38 @@ export default function CameraNodePage({
 
           <div className="pt-2">
             <label
-              className="cursor-pointer px-5 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 inline-block active:scale-95"
-              style={{
-                backgroundColor: COLORS.signalBlue,
-                color: "white",
-                boxShadow: "0 4px 14px rgba(37,99,235,0.4)",
-              }}
+              className="cursor-pointer px-5 py-2.5 rounded-xl text-sm font-semibold inline-block active:scale-95"
+              style={{ backgroundColor: COLORS.signalBlue, color: "white" }}
             >
               📁 Test with Video File
-              <input
-                type="file"
-                accept="video/*"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
+              <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
             </label>
           </div>
 
+          <button
+            type="button"
+            onClick={() => {
+              retryRef.current = 0;
+              disconnectWs(false);
+              connectWebSocket();
+            }}
+            className="px-4 py-2 rounded-xl text-xs font-semibold"
+            style={{
+              border: "1px solid rgba(255,255,255,0.2)",
+              color: "white",
+              backgroundColor: "rgba(255,255,255,0.08)",
+            }}
+          >
+            Reconnect now
+          </button>
+
           {status === "connected" && (
-            <p className="text-xs text-white/40">{frameCount} frames sent</p>
+            <p className="text-xs text-white/40">
+              {frameCount} frames sent{serverReady ? " · server ready" : ""}
+            </p>
           )}
 
-          <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">
-            {wsTarget}
-          </p>
+          <p className="text-[10px] text-white/30 break-all max-w-sm mx-auto px-2">{wsTarget}</p>
         </div>
       </main>
     </div>
