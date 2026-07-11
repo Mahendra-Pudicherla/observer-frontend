@@ -14,9 +14,9 @@ type ConnectionStatus = "disconnected" | "connecting" | "connected";
 type Transport = "http" | "ws" | "none";
 
 const MAX_SEND_WIDTH = 480;
-const JPEG_QUALITY = 0.55;
-const FRAME_INTERVAL_MS = 600;
-const MIN_FRAME_BYTES = 2500;
+const JPEG_QUALITY = 0.45;
+const FRAME_INTERVAL_MS = 220; // ~4–5 fps for live + AI
+const MIN_FRAME_BYTES = 2000;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
@@ -55,6 +55,7 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const transportRef = useRef<Transport>("none");
   const inflightRef = useRef(false);
+  const pendingBlobRef = useRef<Blob | null>(null);
   const failStreakRef = useRef(0);
 
   useEffect(() => {
@@ -178,40 +179,61 @@ function useCameraStream(orgId: string | undefined, cameraId: string) {
     openWs();
 
     const sendFrameHttp = async (blob: Blob) => {
-      if (inflightRef.current) return;
+      // Keep only the newest frame while an upload is in flight
+      if (inflightRef.current) {
+        pendingBlobRef.current = blob;
+        return;
+      }
       inflightRef.current = true;
+      let current: Blob | null = blob;
       try {
-        const res = await fetch(ingestUrl, {
-          method: "POST",
-          headers: { "Content-Type": "image/jpeg" },
-          body: blob,
-          cache: "no-store",
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
-        }
-        failStreakRef.current = 0;
-        if (transportRef.current !== "ws") {
-          transportRef.current = "http";
-          setTransport("http");
-        }
-        setStatus("connected");
-        setWsError(null);
-        setLastHttpDetail(`ok ${blob.size}b`);
-        setFrameCount((c) => c + 1);
-      } catch (err) {
-        failStreakRef.current += 1;
-        const msg = err instanceof Error ? err.message : "network error";
-        setLastHttpDetail(msg);
-        if (failStreakRef.current >= 3 && transportRef.current !== "ws") {
-          setStatus("disconnected");
-          setWsError(`Frame upload failed (${failStreakRef.current}x). ${msg}`);
-          setTransport("none");
-          transportRef.current = "none";
+        while (current && !stopped) {
+          const sending = current;
+          current = null;
+          try {
+            const res = await fetch(ingestUrl, {
+              method: "POST",
+              headers: { "Content-Type": "image/jpeg" },
+              body: sending,
+              cache: "no-store",
+            });
+            if (!res.ok) {
+              const text = await res.text().catch(() => "");
+              throw new Error(`HTTP ${res.status} ${text.slice(0, 80)}`);
+            }
+            failStreakRef.current = 0;
+            if (transportRef.current !== "ws") {
+              transportRef.current = "http";
+              setTransport("http");
+            }
+            setStatus("connected");
+            setWsError(null);
+            setLastHttpDetail(`ok ${sending.size}b`);
+            setFrameCount((c) => c + 1);
+          } catch (err) {
+            failStreakRef.current += 1;
+            const msg = err instanceof Error ? err.message : "network error";
+            setLastHttpDetail(msg);
+            if (failStreakRef.current >= 5 && transportRef.current !== "ws") {
+              setStatus("disconnected");
+              setWsError(`Frame upload failed (${failStreakRef.current}x). ${msg}`);
+              setTransport("none");
+              transportRef.current = "none";
+            }
+            break;
+          }
+          // Flush newest frame captured during upload
+          current = pendingBlobRef.current;
+          pendingBlobRef.current = null;
         }
       } finally {
         inflightRef.current = false;
+        // If something arrived after the loop exited, kick another send
+        const leftover = pendingBlobRef.current;
+        if (leftover && !stopped) {
+          pendingBlobRef.current = null;
+          void sendFrameHttp(leftover);
+        }
       }
     };
 

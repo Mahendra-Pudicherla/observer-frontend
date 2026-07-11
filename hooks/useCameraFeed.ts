@@ -65,7 +65,7 @@ export function useCameraFeed(orgId: string | null, cameraId: string | null) {
             setLive(true);
             clearIdle();
             // No new frames → treat as stopped (clear image + OFFLINE)
-            timeoutRef.current = setTimeout(goOffline, 3500);
+            timeoutRef.current = setTimeout(goOffline, 5000);
           } else if (data.type === "status") {
             if (data.status === "offline" || data.status === "waiting") {
               goOffline();
