@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "@/components/Logo";
 import { BACKEND_WS_URL, COLORS, type Camera } from "@/lib/constants";
 import { createClient } from "@/lib/supabase";
@@ -10,12 +10,238 @@ type ConnectionStatus = "disconnected" | "connecting" | "connected";
 const MAX_SEND_WIDTH = 480;
 const JPEG_QUALITY = 0.4;
 const FRAME_INTERVAL_MS = 500;
-const CLIENT_PING_MS = 12000;
+const CLIENT_PING_MS = 10000;
 
 function buildWsUrl(orgId: string, cameraId: string): string {
   const base = BACKEND_WS_URL.replace(/\/$/, "");
   const wsBase = base.replace(/^http/i, "ws");
   return `${wsBase}/ws/stream/${encodeURIComponent(orgId)}/${encodeURIComponent(cameraId)}`;
+}
+
+/**
+ * Camera node WebSocket manager — intentionally NOT tied to React effect
+ * identity changes (those were causing mobile 1006 disconnect loops).
+ */
+function useCameraStream(orgId: string | undefined, cameraId: string) {
+  const [status, setStatus] = useState<ConnectionStatus>("disconnected");
+  const [wsError, setWsError] = useState<string | null>(null);
+  const [serverReady, setServerReady] = useState(false);
+  const [frameCount, setFrameCount] = useState(0);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const retryRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stoppedRef = useRef(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const orgIdRef = useRef(orgId);
+  const cameraIdRef = useRef(cameraId);
+  const reconnectFnRef = useRef<(() => void) | null>(null);
+
+  orgIdRef.current = orgId;
+  cameraIdRef.current = cameraId;
+
+  useEffect(() => {
+    stoppedRef.current = false;
+
+    const clearRetry = () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
+
+    const closeSocket = () => {
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (!ws) return;
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1000, "stop");
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (stoppedRef.current) return;
+      clearRetry();
+      const attempt = retryRef.current + 1;
+      retryRef.current = attempt;
+      const delay = Math.min(2000 * Math.min(attempt, 8), 20000);
+      setStatus("disconnected");
+      setServerReady(false);
+      setWsError(`Connection lost. Retrying… (attempt ${attempt})`);
+      retryTimerRef.current = setTimeout(() => {
+        if (!stoppedRef.current) openSocket();
+      }, delay);
+    };
+
+    const openSocket = () => {
+      if (stoppedRef.current) return;
+      const oid = orgIdRef.current;
+      const cid = cameraIdRef.current;
+      if (!oid) {
+        setWsError("Missing orgId in URL");
+        setStatus("disconnected");
+        return;
+      }
+
+      const existing = wsRef.current;
+      if (
+        existing &&
+        (existing.readyState === WebSocket.OPEN ||
+          existing.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+
+      clearRetry();
+      closeSocket();
+      setStatus("connecting");
+
+      const wsUrl = buildWsUrl(oid, cid);
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        setStatus("disconnected");
+        setWsError(`Invalid WebSocket URL: ${wsUrl}`);
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (stoppedRef.current || wsRef.current !== ws) return;
+        setStatus("connected");
+        setWsError(null);
+        retryRef.current = 0;
+      };
+
+      ws.onmessage = (event) => {
+        if (stoppedRef.current || wsRef.current !== ws) return;
+        try {
+          const data = JSON.parse(String(event.data)) as { type?: string };
+          if (data.type === "ready" || data.type === "ping") {
+            setServerReady(true);
+            setStatus("connected");
+            setWsError(null);
+          }
+        } catch {
+          // ignore
+        }
+      };
+
+      ws.onerror = () => {
+        if (stoppedRef.current || wsRef.current !== ws) return;
+        // onclose will reconnect
+      };
+
+      ws.onclose = (ev) => {
+        if (stoppedRef.current) return;
+        if (wsRef.current === ws) wsRef.current = null;
+        if (ev.code === 1000) {
+          setStatus("disconnected");
+          return;
+        }
+        setWsError(`Connection lost (code ${ev.code || 1006}). Retrying…`);
+        scheduleReconnect();
+      };
+    };
+
+    openSocket();
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || stoppedRef.current) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        retryRef.current = 0;
+        openSocket();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    // Frame sender — reads latest video/canvas refs
+    const frameTimer = setInterval(() => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ws = wsRef.current;
+      if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!video.videoWidth || !video.videoHeight) return;
+
+      const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
+      let w = Math.max(2, Math.round(video.videoWidth * scale));
+      let h = Math.max(2, Math.round(video.videoHeight * scale));
+      w -= w % 2;
+      h -= h % 2;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+      if (dataUrl.length > 200_000) return;
+
+      try {
+        ws.send(JSON.stringify({ frame: dataUrl }));
+        setFrameCount((c) => c + 1);
+      } catch {
+        // onclose retries
+      }
+    }, FRAME_INTERVAL_MS);
+
+    const pingTimer = setInterval(() => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ type: "ping" }));
+      } catch {
+        // ignore
+      }
+    }, CLIENT_PING_MS);
+
+    const reconnectNow = () => {
+      retryRef.current = 0;
+      clearRetry();
+      closeSocket();
+      openSocket();
+    };
+    reconnectFnRef.current = reconnectNow;
+
+    return () => {
+      stoppedRef.current = true;
+      reconnectFnRef.current = null;
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(frameTimer);
+      clearInterval(pingTimer);
+      clearRetry();
+      closeSocket();
+    };
+    // Only re-run when the stream target changes — NOT on every callback identity change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId, cameraId]);
+
+  const reconnectNow = () => {
+    reconnectFnRef.current?.();
+  };
+
+  return {
+    status,
+    wsError,
+    serverReady,
+    frameCount,
+    videoRef,
+    canvasRef,
+    reconnectNow,
+    wsTarget: orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)",
+  };
 }
 
 export default function CameraNodePage({
@@ -28,33 +254,24 @@ export default function CameraNodePage({
   const { cameraId } = use(params);
   const { orgId } = use(searchParams);
   const supabase = useMemo(() => createClient(), []);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const retryRef = useRef(0);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const connIdRef = useRef(0);
-  const aliveRef = useRef(true);
 
+  const streamRef = useRef<MediaStream | null>(null);
   const [camera, setCamera] = useState<Camera | null>(null);
-  const [status, setStatus] = useState<ConnectionStatus>("disconnected");
-  const [wsError, setWsError] = useState<string | null>(null);
   const [camError, setCamError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
-  const [frameCount, setFrameCount] = useState(0);
   const [videoSource, setVideoSource] = useState<"webcam" | "file">("webcam");
   const [videoFileUrl, setVideoFileUrl] = useState<string | null>(null);
-  const [serverReady, setServerReady] = useState(false);
 
-  useEffect(() => {
-    aliveRef.current = true;
-    return () => {
-      aliveRef.current = false;
-    };
-  }, []);
+  const {
+    status,
+    wsError,
+    serverReady,
+    frameCount,
+    videoRef,
+    canvasRef,
+    reconnectNow,
+    wsTarget,
+  } = useCameraStream(orgId, cameraId);
 
   useEffect(() => {
     if (!orgId || !cameraId) {
@@ -68,306 +285,101 @@ export default function CameraNodePage({
         .eq("org_id", orgId)
         .eq("id", cameraId)
         .maybeSingle();
-      if (aliveRef.current) setCamera(data as Camera | null);
+      setCamera(data as Camera | null);
     })();
   }, [orgId, cameraId, supabase]);
 
-  const disconnectWs = useCallback((scheduleRetry: boolean) => {
-    const ws = wsRef.current;
-    wsRef.current = null;
-    if (ws) {
-      try {
-        ws.onopen = null;
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.onmessage = null;
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          ws.close(1000, "client disconnect");
+  useEffect(() => {
+    let cancelled = false;
+
+    const start = async () => {
+      setCamError(null);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      const el = videoRef.current;
+      if (el) {
+        el.srcObject = null;
+        el.src = "";
+      }
+
+      if (videoSource === "file" && videoFileUrl) {
+        if (el) {
+          el.src = videoFileUrl;
+          el.loop = true;
+          el.onloadedmetadata = () => {
+            el.play().catch(() => undefined);
+          };
         }
-      } catch {
-        // ignore
-      }
-    }
-
-    if (!scheduleRetry || !aliveRef.current || !orgId) return;
-
-    const attempt = retryRef.current + 1;
-    retryRef.current = attempt;
-    // Longer backoff for 1006 / mobile networks
-    const delay = Math.min(1500 * 2 ** Math.min(attempt - 1, 4), 25000);
-    setStatus("disconnected");
-    setServerReady(false);
-    setWsError(`Connection lost. Retrying… (attempt ${attempt})`);
-
-    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-    retryTimerRef.current = setTimeout(() => {
-      if (aliveRef.current) connectWebSocket();
-    }, delay);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId]);
-
-  const connectWebSocket = useCallback(() => {
-    if (!orgId || !aliveRef.current) return;
-
-    // Already connected / connecting — do not open a second socket
-    const existing = wsRef.current;
-    if (
-      existing &&
-      (existing.readyState === WebSocket.OPEN ||
-        existing.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-
-    const myId = ++connIdRef.current;
-    setStatus("connecting");
-    setServerReady(false);
-
-    const wsUrl = buildWsUrl(orgId, cameraId);
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(wsUrl);
-    } catch {
-      setStatus("disconnected");
-      setWsError(`Invalid WebSocket URL: ${wsUrl}`);
-      return;
-    }
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (!aliveRef.current || myId !== connIdRef.current) return;
-      setStatus("connected");
-      setWsError(null);
-      retryRef.current = 0;
-    };
-
-    ws.onmessage = (event) => {
-      if (!aliveRef.current || myId !== connIdRef.current) return;
-      try {
-        const data = JSON.parse(String(event.data)) as { type?: string };
-        if (data.type === "ready" || data.type === "ping") {
-          setServerReady(true);
-          setStatus("connected");
-          setWsError(null);
-        }
-      } catch {
-        // ignore non-JSON
-      }
-    };
-
-    ws.onerror = () => {
-      // onclose handles retry; keep first-error hint
-      if (!aliveRef.current || myId !== connIdRef.current) return;
-      if (retryRef.current === 0) {
-        setWsError(
-          `WebSocket error. Check Railway is online. URL: ${wsUrl}`
-        );
-      }
-    };
-
-    ws.onclose = (ev) => {
-      if (myId !== connIdRef.current) return;
-      if (!aliveRef.current) return;
-
-      // Normal close from our own disconnectWs(false) during unmount
-      if (ev.code === 1000) {
-        setStatus("disconnected");
         return;
       }
 
-      setWsError(
-        `Connection lost (code ${ev.code || 1006}). Retrying… (attempt ${retryRef.current + 1})`
-      );
-      disconnectWs(true);
-    };
-  }, [orgId, cameraId, disconnectWs]);
+      await new Promise((r) => setTimeout(r, 200));
+      if (cancelled) return;
 
-  const startCamera = useCallback(async () => {
-    setCamError(null);
+      const attempts: MediaStreamConstraints[] = [
+        {
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 480, max: 640 },
+            height: { ideal: 360, max: 480 },
+            frameRate: { ideal: 8, max: 12 },
+          },
+          audio: false,
+        },
+        { video: { facingMode: { ideal: facingMode } }, audio: false },
+        { video: true, audio: false },
+      ];
 
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.src = "";
-    }
+      let stream: MediaStream | null = null;
+      for (const constraints of attempts) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          break;
+        } catch {
+          // next
+        }
+      }
 
-    if (videoSource === "file" && videoFileUrl) {
+      if (cancelled) {
+        stream?.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      if (!stream) {
+        setCamError("Camera access denied. Allow camera permissions and reload.");
+        return;
+      }
+
+      streamRef.current = stream;
       if (videoRef.current) {
-        videoRef.current.src = videoFileUrl;
-        videoRef.current.loop = true;
+        videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play().catch(() => undefined);
         };
       }
-      return;
-    }
 
-    await new Promise((r) => setTimeout(r, 250));
-
-    const attempts: MediaStreamConstraints[] = [
-      {
-        video: {
-          facingMode: { ideal: facingMode },
-          width: { ideal: 480, max: 640 },
-          height: { ideal: 360, max: 480 },
-          frameRate: { ideal: 8, max: 12 },
-        },
-        audio: false,
-      },
-      { video: { facingMode: { ideal: facingMode } }, audio: false },
-      { video: true, audio: false },
-    ];
-
-    let stream: MediaStream | null = null;
-    for (const constraints of attempts) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
-        break;
-      } catch {
-        // next
-      }
-    }
-
-    if (!stream) {
-      setCamError("Camera access denied. Allow camera permissions and reload.");
-      return;
-    }
-
-    streamRef.current = stream;
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.onloadedmetadata = () => {
-        videoRef.current?.play().catch(() => undefined);
-      };
-    }
-
-    if ("wakeLock" in navigator) {
-      try {
-        await (
-          navigator as Navigator & {
-            wakeLock: { request: (t: string) => Promise<unknown> };
-          }
-        ).wakeLock.request("screen");
-      } catch {
-        // optional
-      }
-    }
-  }, [facingMode, videoSource, videoFileUrl]);
-
-  // Frames + ping — only after socket is open
-  useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (pingRef.current) clearInterval(pingRef.current);
-
-    intervalRef.current = setInterval(() => {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ws = wsRef.current;
-      if (!video || !canvas || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!video.videoWidth || !video.videoHeight) return;
-
-      const scale = Math.min(1, MAX_SEND_WIDTH / video.videoWidth);
-      let w = Math.max(2, Math.round(video.videoWidth * scale));
-      let h = Math.max(2, Math.round(video.videoHeight * scale));
-      w -= w % 2;
-      h -= h % 2;
-      canvas.width = w;
-      canvas.height = h;
-
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(video, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-      if (dataUrl.length > 220_000) return;
-
-      try {
-        ws.send(JSON.stringify({ frame: dataUrl }));
-        setFrameCount((c) => c + 1);
-      } catch {
-        // onclose will retry
-      }
-    }, FRAME_INTERVAL_MS);
-
-    pingRef.current = setInterval(() => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      try {
-        ws.send(JSON.stringify({ type: "ping" }));
-      } catch {
-        // ignore
-      }
-    }, CLIENT_PING_MS);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (pingRef.current) clearInterval(pingRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    void startCamera();
-    return () => {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-    };
-  }, [startCamera]);
-
-  // Connect once per org/camera — avoid Strict Mode double-close races
-  useEffect(() => {
-    if (!orgId) return;
-    aliveRef.current = true;
-    retryRef.current = 0;
-    connectWebSocket();
-
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      const ws = wsRef.current;
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        retryRef.current = 0;
-        connectWebSocket();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisible);
-
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-      // Bump conn id so in-flight handlers ignore events
-      connIdRef.current += 1;
-      const ws = wsRef.current;
-      wsRef.current = null;
-      if (ws) {
-        ws.onopen = null;
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.onmessage = null;
+      if ("wakeLock" in navigator) {
         try {
-          ws.close(1000, "unmount");
+          await (
+            navigator as Navigator & {
+              wakeLock: { request: (t: string) => Promise<unknown> };
+            }
+          ).wakeLock.request("screen");
         } catch {
-          // ignore
+          // optional
         }
       }
     };
-  }, [orgId, cameraId, connectWebSocket]);
 
-  const toggleCamera = () => {
-    setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setVideoFileUrl(URL.createObjectURL(file));
-      setVideoSource("file");
-    }
-  };
+    void start();
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+  }, [facingMode, videoSource, videoFileUrl, videoRef]);
 
   const displayError = camError || wsError;
   const statusLabel =
@@ -384,8 +396,6 @@ export default function CameraNodePage({
       : status === "connecting"
         ? COLORS.cautionAmber
         : COLORS.alertRed;
-
-  const wsTarget = orgId ? buildWsUrl(orgId, cameraId) : "(missing orgId)";
 
   return (
     <div className="min-h-screen flex flex-col" style={{ backgroundColor: COLORS.midnight }}>
@@ -407,7 +417,13 @@ export default function CameraNodePage({
         )}
 
         <div className="w-full max-w-lg aspect-video rounded-xl overflow-hidden bg-black relative">
-          <video ref={videoRef} className="w-full h-full object-cover" playsInline muted autoPlay />
+          <video
+            ref={videoRef}
+            className="w-full h-full object-cover"
+            playsInline
+            muted
+            autoPlay
+          />
         </div>
         <canvas ref={canvasRef} className="hidden" />
 
@@ -419,7 +435,9 @@ export default function CameraNodePage({
 
           {videoSource === "webcam" ? (
             <button
-              onClick={toggleCamera}
+              onClick={() =>
+                setFacingMode((prev) => (prev === "environment" ? "user" : "environment"))
+              }
               className="px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95"
               style={{
                 backgroundColor: "rgba(255,255,255,0.12)",
@@ -449,17 +467,24 @@ export default function CameraNodePage({
               style={{ backgroundColor: COLORS.signalBlue, color: "white" }}
             >
               📁 Test with Video File
-              <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+              <input
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    setVideoFileUrl(URL.createObjectURL(file));
+                    setVideoSource("file");
+                  }
+                }}
+              />
             </label>
           </div>
 
           <button
             type="button"
-            onClick={() => {
-              retryRef.current = 0;
-              disconnectWs(false);
-              connectWebSocket();
-            }}
+            onClick={reconnectNow}
             className="px-4 py-2 rounded-xl text-xs font-semibold"
             style={{
               border: "1px solid rgba(255,255,255,0.2)",
