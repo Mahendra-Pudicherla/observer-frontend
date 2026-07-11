@@ -32,8 +32,11 @@ export function CameraFeedCard({
 
   // Update <img> directly — avoids React re-render lag on every JPEG
   useEffect(() => {
-    if (frame && imgRef.current) {
+    if (!imgRef.current) return;
+    if (frame) {
       imgRef.current.src = frame;
+    } else {
+      imgRef.current.removeAttribute("src");
     }
   }, [frame]);
 

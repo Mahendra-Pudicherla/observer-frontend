@@ -35,6 +35,12 @@ export function useCameraFeed(orgId: string | null, cameraId: string | null) {
       }
     };
 
+    const goOffline = () => {
+      setLive(false);
+      setFrame(null);
+      clearIdle();
+    };
+
     const connect = () => {
       if (stopped) return;
 
@@ -58,12 +64,11 @@ export function useCameraFeed(orgId: string | null, cameraId: string | null) {
             setFrame(src);
             setLive(true);
             clearIdle();
-            // Mark offline if frames stop arriving
-            timeoutRef.current = setTimeout(() => setLive(false), 5000);
+            // No new frames → treat as stopped (clear image + OFFLINE)
+            timeoutRef.current = setTimeout(goOffline, 3500);
           } else if (data.type === "status") {
-            if (data.status === "offline") {
-              setLive(false);
-              clearIdle();
+            if (data.status === "offline" || data.status === "waiting") {
+              goOffline();
             }
           }
         } catch {
@@ -72,7 +77,7 @@ export function useCameraFeed(orgId: string | null, cameraId: string | null) {
       };
 
       ws.onclose = () => {
-        setLive(false);
+        goOffline();
         if (stopped) return;
         const attempt = retryRef.current + 1;
         retryRef.current = attempt;
